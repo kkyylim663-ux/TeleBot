@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebBot · 网页账单</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">📒 WebBot 网页账单</div>
+    <div class="group-line">
+      群组：<select id="groupSelect"></select>
+      <span id="periodInfo" class="muted"></span>
+    </div>
+    <div class="tip">💡 「当前账单」下拉可切换历史账单（历史为当日汇总）· 手机版请横屏查看</div>
+  </header>
+
+  <section class="controls">
+    <div class="row">
+      <span class="date-wrap">
+        <label>Date Range <input type="text" id="dateRange" class="date-range" readonly placeholder="点选开始日期"></label>
+        <div id="calendar" class="calendar hidden"></div>
+      </span>
+      <label><input type="checkbox" id="allTime"> 全部时间</label>
+    </div>
+    <div class="row">
+      <label>操作人 <select id="operatorSelect"><option value="">全部</option></select></label>
+      <label>备注 <input type="text" id="noteFilter" placeholder="关键字筛选"></label>
+    </div>
+    <div class="row center">
+      <select id="billSelect"></select>
+      <button id="viewBtn" class="btn primary">查看账单</button>
+      <button id="exportBtn" class="btn primary">导出xlsx</button>
+    </div>
+  </section>
+
+  <main id="content"><p class="empty">正在加载数据...</p></main>
+
+  <footer class="tip footer">WebBot 只读查看 · 记账请在 Telegram bot 里操作 · 数据实时读取 bot 数据文件</footer>
+
+  <script src="/static/vendor/xlsx.full.min.js"></script>
+  <script>
+    // 本地没有 vendor 文件时回退到 CDN（导出按钮点击时会再检查一次）
+    if (typeof XLSX === "undefined") {
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/package/dist/xlsx.full.min.js";
+      document.head.appendChild(s);
+    }
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
