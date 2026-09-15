@@ -1,0 +1,11 @@
+# 包含真实 bot token 的笔记文件，不上传
+Bot 计算机.txt
+
+# 本地工具状态目录
+.mimosa/
+.zcode/
+
+# Python
+__pycache__/
+*.pyc
+.env
