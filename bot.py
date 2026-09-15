@@ -7,6 +7,11 @@ import re
 import sys
 import urllib.error
 import urllib.request
+
+try:
+    import webconsole  # 账单明细网页控制台（同目录 webconsole.py）
+except ImportError:
+    webconsole = None
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -58,6 +63,7 @@ OPERATORS_FILE = os.path.join(_data_dir, "operators.json")
 ADDRESS_LOG_FILE = os.path.join(_data_dir, "usdt_addresses.json")
 MY_ADDRESS_FILE = os.path.join(_data_dir, "my_address.json")
 GLOBAL_BILL_ARCHIVE_FILE = os.path.join(_data_dir, "global_bill_archive.json")
+PENDING_SCANS_FILE = os.path.join(_data_dir, "pending_scans.json")
 
 DEFAULT_LEDGER_SETTINGS = {
     "currency": "AUD",
@@ -414,6 +420,34 @@ def load_clear_snapshots():
 
 def save_clear_snapshots(data):
     save_json(LEDGER_CLEAR_SNAPSHOT_FILE, data)
+
+def create_ledger_entry(chat_id, entry_type, amount, note, operator_id, operator_name,
+                        tag=None, source=None, extra=None):
+    """入账/出账的唯一入口：Telegram 和网页控制台共用，保证两边记账口径完全一致。
+    构建（含分组成员代号、来源标记）、分配序号并写入账本，返回完整条目。"""
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(chat_id)
+    entry = {
+        "type": entry_type,
+        "amount": amount,
+        "net_amount": amount,
+        "currency": settings["currency"],
+        "note": note,
+        "operator_id": operator_id,
+        "operator_name": operator_name,
+        "time": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if tag:
+        entry["group"] = tag
+    if source:
+        entry["source"] = source
+    if extra:
+        entry.update(extra)
+    data_now = load_ledger_entries()
+    entry["id"] = len(data_now.get(str(chat_id), [])) + 1
+    entry["voided"] = False
+    append_ledger_entry(chat_id, entry)
+    return entry
 
 # ---------- USDT 地址查重 + TRON 钱包信息 ----------
 
@@ -1140,13 +1174,29 @@ def build_ledger_summary(chat_id):
     return "\n".join(lines)
 
 
-def build_ledger_detail_keyboard(chat_id):
-    """返回账单消息下面「账单明细」按钮的 InlineKeyboardMarkup。
-    链接带上 chat_id 参数，跳到该群自己的网页；未配置 LEDGER_DETAIL_BASE_URL 时不显示按钮（返回 None）。"""
-    if not LEDGER_DETAIL_BASE_URL:
+def build_console_link(chat_id, user):
+    """生成账单明细网页控制台的签名链接（带操作员身份，可在网页上记账）。
+    未配置 WEB_CONSOLE_SECRET 或调用处没有用户身份时返回 None。"""
+    secret = os.environ.get("WEB_CONSOLE_SECRET", "").strip()
+    if not secret or webconsole is None or user is None:
         return None
-    sep = "&" if "?" in LEDGER_DETAIL_BASE_URL else "?"
-    url = f"{LEDGER_DETAIL_BASE_URL}{sep}chat_id={chat_id}"
+    base = os.environ.get("WEB_CONSOLE_BASE_URL", "").strip()
+    if not base:
+        base = webconsole.detect_base_url(int(os.environ.get("WEB_CONSOLE_PORT", "8787")))
+    username = user.username or ""
+    return webconsole.build_link(secret, base, user.id, chat_id, username)
+
+
+def build_ledger_detail_keyboard(chat_id, user=None):
+    """返回账单消息下面「账单明细」按钮的 InlineKeyboardMarkup。
+    配置了 WEB_CONSOLE_SECRET 时返回带签名的控制台链接（记账口径与 Bot 一致）；
+    否则沿用 LEDGER_DETAIL_BASE_URL 的只读网页。两者都没配则不显示按钮。"""
+    url = build_console_link(chat_id, user)
+    if url is None and LEDGER_DETAIL_BASE_URL:
+        sep = "&" if "?" in LEDGER_DETAIL_BASE_URL else "?"
+        url = f"{LEDGER_DETAIL_BASE_URL}{sep}chat_id={chat_id}"
+    if not url:
+        return None
     return InlineKeyboardMarkup([[InlineKeyboardButton("📋 账单明细", url=url)]])
 
 
@@ -1169,33 +1219,17 @@ async def try_handle_ledger_entry(update: Update, context: ContextTypes.DEFAULT_
 
     chat_id = update.effective_chat.id
     user = update.effective_user
-    settings = get_group_ledger_settings(chat_id)
-    tz = get_ledger_tz(chat_id)
 
     entry_type = "in" if sign == "+" else "out"
-
-    entry = {
-        "type": entry_type,
-        "amount": amount,
-        "net_amount": amount,
-        "currency": settings["currency"],
-        "note": note,
-        "operator_id": user.id,
-        "operator_name": f"@{user.username}" if user.username else (user.full_name or str(user.id)),
-        "time": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    if tag:
-        entry["group"] = tag
-
-    data_now = load_ledger_entries()
-    entry["id"] = len(data_now.get(str(chat_id), [])) + 1
-    entry["voided"] = False
-    entry["user_message_id"] = update.message.message_id
-    append_ledger_entry(chat_id, entry)
+    operator_name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+    entry = create_ledger_entry(
+        chat_id, entry_type, amount, note, user.id, operator_name,
+        tag=tag, extra={"user_message_id": update.message.message_id},
+    )
 
     summary_text = build_ledger_summary(chat_id)
     sent = await update.message.reply_text(
-        summary_text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id)
+        summary_text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id, user)
     )
 
     data_after = load_ledger_entries()
@@ -1246,7 +1280,7 @@ async def try_handle_ledger_disburse(update: Update, context: ContextTypes.DEFAU
 
     summary_text = build_ledger_summary(chat_id)
     sent = await update.message.reply_text(
-        summary_text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id)
+        summary_text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id, user)
     )
 
     data_after = load_ledger_entries()
@@ -1307,7 +1341,7 @@ async def try_handle_ledger_revoke(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(
             f"✅ 已撤销记录（#{target['id']}），以下为最新账单：\n\n{summary_text}",
             parse_mode="HTML",
-            reply_markup=build_ledger_detail_keyboard(chat_id),
+            reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
         )
         return True
 
@@ -1320,7 +1354,7 @@ async def try_handle_ledger_revoke(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(
         f"✅ 已恢复记录（#{target['id']}），以下为最新账单：\n\n{summary_text}",
         parse_mode="HTML",
-        reply_markup=build_ledger_detail_keyboard(chat_id),
+        reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
     )
     return True
 
@@ -1340,7 +1374,7 @@ async def try_handle_ledger_settings(update: Update, context: ContextTypes.DEFAU
             f"✅ 已清空本期账单，共 {count} 笔记录作废（结转余额不受影响）\n"
             f"如果操作有误，可发「撤销清空账单」撤回。\n\n{summary_text}",
             parse_mode="HTML",
-            reply_markup=build_ledger_detail_keyboard(chat_id),
+            reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
         )
         return True
     if RE_HIDE_CURRENCY.match(text):
@@ -1417,14 +1451,15 @@ async def try_handle_ledger_settings(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text(
                 f"✅ 已将 {changed} 笔记录的币种从 {src} 改为 {dst}\n\n{summary_text}",
                 parse_mode="HTML",
-                reply_markup=build_ledger_detail_keyboard(chat_id),
+                reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
             )
         return True
 
     if RE_VIEW_LEDGER_BILL.match(text):
         text_out = build_ledger_summary(chat_id)
         await update.message.reply_text(
-            text_out, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id)
+            text_out, parse_mode="HTML",
+            reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
         )
         return True
 
@@ -1438,7 +1473,7 @@ async def try_handle_ledger_settings(update: Update, context: ContextTypes.DEFAU
             f"⬆️ <b>总进金额</b>：{_fmt_num(stats['total_in_amount'])}\n"
             f"⬇️ <b>总出金额</b>：{_fmt_num(stats['total_out_amount'])}",
             parse_mode="HTML",
-            reply_markup=build_ledger_detail_keyboard(chat_id),
+            reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
         )
         return True
 
@@ -1548,6 +1583,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_operator(user):
         return
 
+    chat = update.effective_chat
+    if chat is not None and chat.title:
+        _CHAT_TITLES[str(chat.id)] = chat.title  # 网页控制台顶部展示群名称用
+
     text = update.message.text.strip()
     bot_username = context.bot.username
     if bot_username:
@@ -1576,7 +1615,149 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await try_handle_my_address(update, context, text):
         return
 
+# ---------- 账单明细网页控制台（进程内嵌，实现见 webconsole.py）----------
+
+_CHAT_TITLES = {}  # 群名称缓存：网页页面顶部展示用
+
+
+def _console_authorized(user_id, username):
+    """网页控制台的授权判断，与 Telegram 侧同一份名单（管理员 + 操作员）。"""
+    if username and username.lower() in {u.lower() for u in ADMIN_USERNAMES}:
+        return True
+    data = load_operators()
+    if user_id and user_id in data["ids"]:
+        return True
+    if username and username.lower() in [u.lower() for u in data["usernames"]]:
+        return True
+    return False
+
+
+def _console_entry_view(e):
+    """账本条目 → 网页展示格式（补齐手续费、来源标签；不暴露内部编号）。"""
+    if e.get("type") == "disburse":
+        fee = e.get("fee_flat")
+        if fee is None:
+            fee = round(e.get("amount", 0) - abs(e.get("net_amount", 0)), 4)
+    else:
+        fee = 0.0
+    src = e.get("source", "telegram")
+    return {
+        "time": e.get("time", ""), "type": e.get("type"),
+        "amount": e.get("amount", 0), "fee": fee,
+        "net_amount": e.get("net_amount", 0), "currency": e.get("currency", ""),
+        "note": e.get("note", ""), "operator_name": e.get("operator_name", ""),
+        "voided": bool(e.get("voided")), "source": src,
+        "source_label": {"web": "网页", "scan": "扫描单"}.get(src, "Telegram"),
+    }
+
+
+def _console_period_view(chat_id, period):
+    """网页控制台的汇总+明细视图，口径与「账单」卡片完全一致：
+    当前账期用实时账本原语统计；历史账期用日切归档（Bot 日切会清明细，历史只有汇总）。"""
+    tz = get_ledger_tz(chat_id)
+    label = get_period_label(chat_id, tz)
+    settings = get_group_ledger_settings(chat_id)
+
+    if period and period != label:
+        day = load_global_archive().get(str(chat_id), {}).get(period)
+        if not day:
+            return None
+        tin = round(day.get("total_in_amount", 0.0), 4)
+        tout = round(day.get("total_out_amount", 0.0), 4)
+        return {
+            "period": period, "current": False,
+            "totals": [{"currency": day.get("currency", settings["currency"]),
+                        "in": tin, "out": -tout,
+                        "carried": None, "grand": round(day.get("settlement", 0.0), 4)}],
+            "entries": [],
+            "note": "历史账期只有当日汇总（日切时明细按 Bot 规则已清空）",
+        }
+
+    deposit_totals = get_today_totals(chat_id, tz)
+    _, disburse_totals = get_today_disburse(chat_id, tz)
+    carried = get_group_carryover(chat_id)
+    currencies = []
+    for c in [settings["currency"]] + list(deposit_totals) + list(disburse_totals) + list(carried):
+        if c not in currencies:
+            currencies.append(c)
+    totals = []
+    for c in currencies:
+        tin = round(deposit_totals.get(c, 0.0), 4)
+        tout = round(disburse_totals.get(c, 0.0), 4)
+        tc = carried.get(c)
+        totals.append({
+            "currency": c, "in": tin, "out": tout,
+            "carried": round(tc, 4) if isinstance(tc, (int, float)) else None,
+            "grand": round(tin + tout, 4),
+        })
+    ps = get_period_start_str(chat_id, tz)
+    entries = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
+    entries.sort(key=lambda x: x.get("time", ""))
+    return {
+        "period": label, "current": True,
+        "totals": totals,
+        "entries": [_console_entry_view(e) for e in entries],
+        "note": "",
+    }
+
+
+def _console_periods(chat_id):
+    """历史账期标签（日切归档日期），倒序；供网页账期切换下拉框。"""
+    archive = load_global_archive().get(str(chat_id), {})
+    return sorted(archive.keys(), reverse=True)
+
+
+def _console_scan_recorded(chat_id, scan_id):
+    """该扫描单是否已经记过账（防止同一张扫描单入账两次）。"""
+    if not scan_id:
+        return False
+    for e in load_ledger_entries().get(str(chat_id), []):
+        if e.get("scan_id") == scan_id and not e.get("voided"):
+            return True
+    return False
+
+
+def start_web_console():
+    """把 Bot 侧账本原语注入网页控制台并启动内嵌 HTTP 服务。
+    只配置了 WEB_CONSOLE_SECRET 才启用；未配置时 Bot 行为与原来完全一致。"""
+    if webconsole is None:
+        return
+    secret = os.environ.get("WEB_CONSOLE_SECRET", "").strip()
+    if not secret:
+        return
+    try:
+        httpd = webconsole.start(secret, {
+            "authorized": _console_authorized,
+            "chat_title": lambda cid: _CHAT_TITLES.get(str(cid), f"群 {cid}"),
+            "settings_view": lambda cid: {
+                k: get_group_ledger_settings(cid).get(k)
+                for k in ("currency", "in_fee", "out_fee", "tz_offset", "hide_currency")
+            },
+            "period_view": _console_period_view,
+            "periods": _console_periods,
+            "add_entry": create_ledger_entry,
+            "scan_recorded": _console_scan_recorded,
+            "scans_file": PENDING_SCANS_FILE,
+        })
+    except OSError as e:
+        logger.error("❌ 账单明细网页控制台启动失败（端口被占用？）：%s", e)
+        return
+    except Exception:
+        logger.exception("❌ 账单明细网页控制台启动失败（网页不可用不影响 Bot 其他功能）")
+        return
+    port = os.environ.get("WEB_CONSOLE_PORT", "8787").strip()
+    base = os.environ.get("WEB_CONSOLE_BASE_URL", "").strip()
+    if base:
+        shown = base
+    elif os.environ.get("WEB_CONSOLE_BIND", "127.0.0.1").strip() == "127.0.0.1":
+        shown = f"http://127.0.0.1:{port}"
+    else:
+        shown = f"http://{webconsole.detect_lan_ip()}:{port}"
+    logger.info("✅ 账单明细网页控制台已启动：%s（从 Telegram「账单」卡片的「📋 账单明细」按钮进入）", shown)
+
+
 async def post_init(application):
+    start_web_console()
     await application.bot.set_my_commands([
         BotCommand("start", "开始聊天"),
         BotCommand("ledger", "查看本群账单"),
@@ -1618,7 +1799,8 @@ async def ledger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = build_ledger_summary(chat_id)
     await update.message.reply_text(
-        text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id)
+        text, parse_mode="HTML",
+        reply_markup=build_ledger_detail_keyboard(chat_id, update.effective_user),
     )
 
 
