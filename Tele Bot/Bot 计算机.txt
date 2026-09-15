@@ -1,0 +1,3356 @@
+import json
+import os
+import re
+import asyncio
+import io
+from datetime import datetime, timezone, timedelta, time as dt_time
+from openpyxl import Workbook
+from openpyxl.styles import Font
+
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters,
+    ConversationHandler, CallbackQueryHandler,
+)
+from telegram.error import Forbidden, BadRequest, ChatMigrated
+
+TOKEN = "8705954564:AAESi8EoHoeQp7Bui1uTIdr1Y_jGnvGT3C0"
+
+PAGE_SIZE = 10
+
+ADMIN_USERNAMES = {"IgAccJohn", "Dragonball77", "MrK6776", "IgCsLyn", "jiang9546"}
+
+AUTH_FILE = "/app/authorized_users.json"
+SCHEDULE_FILE = "/app/broadcast_schedules.json"
+
+
+(
+    ADDUSER_WAIT,
+    ADDTARGET_ID, ADDTARGET_GROUP, ADDTARGET_LABEL,
+    ADDDRAFT_NAME, ADDDRAFT_CONTENT,
+) = range(100, 106)
+
+
+(
+    BC_TIMING_MENU,
+    BC_SCHED_ACTION,
+    BC_INPUT_TIME,
+    BC_CHOOSE_GROUP,
+    BC_CHOOSE_SOURCE,
+    BC_TYPING_CONTENT,
+    BC_CHOOSE_DRAFT,
+    BC_CONFIRM
+) = range(200, 208)
+
+
+def load_json(path, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_auth():
+    return load_json(AUTH_FILE, {"ids": [], "usernames": []})
+
+
+def save_auth(data):
+    save_json(AUTH_FILE, data)
+
+
+def is_admin(user) -> bool:
+    if not user.username:
+        return False
+    return user.username.lower() in {u.lower() for u in ADMIN_USERNAMES}
+
+
+def is_authorized(user) -> bool:
+    if is_admin(user):
+        return True
+    data = load_auth()
+    if user.id in data["ids"]:
+        return True
+    if user.username and user.username.lower() in [u.lower() for u in data["usernames"]]:
+        return True
+    return False
+
+
+TENANTS_FILE = "/app/tenants.json"
+
+CYCLE_LABELS = {
+    "once": "一次性",
+    "monthly": "每月",
+    "weekly": "每周",
+    "yearly": "每年",
+    "custom": "自定义天数",
+}
+
+
+def load_tenants():
+    return load_json(TENANTS_FILE, {})
+
+
+def save_tenants(data):
+    save_json(TENANTS_FILE, data)
+
+
+def _add_months(d, n):
+    month = d.month - 1 + n
+    year = d.year + month // 12
+    month = month % 12 + 1
+    import calendar
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return d.replace(year=year, month=month, day=day)
+
+
+def _add_years(d, n):
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:
+        return d.replace(year=d.year + n, day=28)
+
+
+def compute_next_due(base_date, cycle_type, cycle_days=None):
+    if cycle_type == "once":
+        return None
+    if cycle_type == "monthly":
+        return _add_months(base_date, 1)
+    if cycle_type == "weekly":
+        return base_date + timedelta(days=7)
+    if cycle_type == "yearly":
+        return _add_years(base_date, 1)
+    if cycle_type == "custom":
+        return base_date + timedelta(days=cycle_days or 30)
+    return None
+
+
+def compute_status_text(current_period, min_periods):
+    if current_period >= min_periods:
+        return f"已满最低期（第{current_period}期起）"
+    remain = min_periods - current_period
+    return f"还剩{remain}期"
+
+
+def parse_duedate_line(line: str):
+    parts = line.strip().split()
+    if len(parts) != 4:
+        return None, "格式应为：设备名 开始日期 金额 合约期数（空格分隔，共4项）"
+    name, date_str, amount_str, periods_str = parts
+    try:
+        start_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None, "开始日期格式错误，应为 YYYY-MM-DD（例如 2026-08-05）"
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        return None, "金额必须是数字"
+    try:
+        min_periods = int(periods_str)
+        if min_periods < 1:
+            raise ValueError
+    except ValueError:
+        return None, "合约期数必须是正整数"
+    return {
+        "name": name,
+        "start_date": start_date.isoformat(),
+        "amount": amount,
+        "min_periods": min_periods,
+    }, None
+
+
+DD_GROUP, DD_ITEMS, DD_CYCLE_DAYS = 400, 401, 402
+
+
+async def duedate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    known = load_known_groups()
+    if not known:
+        await update.message.reply_text(
+            "还没追踪到任何群——Bot需要先在目标群里收到过至少一条消息才能自动识别。\n"
+            "发 /cancel 取消"
+        )
+        return ConversationHandler.END
+    buttons = [
+        [InlineKeyboardButton(info.get("title") or cid, callback_data=f"dd:pick:{cid}")]
+        for cid, info in known.items()
+    ]
+    await update.message.reply_text(
+        "第1步：选择要登记租户项目的群组：\n发 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return DD_GROUP
+
+
+async def duedate_pick_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.data.split(":", 2)[2]
+    context.user_data["dd_chat_id"] = chat_id
+    context.user_data["dd_items"] = []
+    await query.edit_message_text(
+        "第2步：批量输入项目，一行一个，空格分隔4项：\n"
+        "设备名 开始日期(YYYY-MM-DD) 金额 合约期数\n\n"
+        "例如：\n设备A 2026-08-05 3200 6\n设备B 2026-08-06 1500 3\n\n"
+        "可以分多条消息陆续输入，输错的行会单独提示重填，其他行不受影响。"
+    )
+    return DD_ITEMS
+
+
+async def duedate_receive_items(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = [l for l in update.message.text.splitlines() if l.strip()]
+    items = context.user_data.setdefault("dd_items", [])
+    errors = []
+    added = 0
+    for line in lines:
+        parsed, err = parse_duedate_line(line)
+        if err:
+            errors.append(f"「{line.strip()}」→ {err}")
+        else:
+            items.append(parsed)
+            added += 1
+
+    msg_parts = []
+    if added:
+        msg_parts.append(f"✅ 本次成功收录 {added} 项，累计 {len(items)} 项")
+    if errors:
+        msg_parts.append("⚠️ 以下行有误，请重新单独发送这些行：\n" + "\n".join(errors))
+    text = "\n\n".join(msg_parts) if msg_parts else "没有识别到任何有效行，请重新输入"
+
+    buttons = []
+    if items:
+        buttons.append([InlineKeyboardButton(f"✅ 完成录入（共 {len(items)} 项），下一步", callback_data="dd:itemsdone")])
+    if buttons:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.message.reply_text(text)
+    return DD_ITEMS
+
+
+async def duedate_items_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    items = context.user_data.get("dd_items", [])
+    if not items:
+        await query.answer("还没有任何有效项目", show_alert=True)
+        return DD_ITEMS
+    await query.answer()
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"dd:cycle:{key}")]
+        for key, label in CYCLE_LABELS.items()
+    ]
+    await query.edit_message_text("第3步：选择这批项目的续费周期：", reply_markup=InlineKeyboardMarkup(buttons))
+    return DD_ITEMS
+
+
+async def _duedate_save(update_or_query, context, cycle_type, cycle_days=None):
+    chat_id = context.user_data.pop("dd_chat_id")
+    items = context.user_data.pop("dd_items", [])
+    user = update_or_query.from_user if hasattr(update_or_query, "from_user") else update_or_query.effective_user
+    creator = user.username or ""
+
+    data = load_tenants()
+    bucket = data.setdefault(str(chat_id), {})
+    now_ts = int(datetime.now().timestamp() * 1000)
+    for i, item in enumerate(items):
+        item_id = f"{now_ts}_{i}"
+        start_date = datetime.strptime(item["start_date"], "%Y-%m-%d").date()
+        due = compute_next_due(start_date, cycle_type, cycle_days)
+        bucket[item_id] = {
+            "name": item["name"],
+            "start_date": item["start_date"],
+            "amount": item["amount"],
+            "min_periods": item["min_periods"],
+            "cycle_type": cycle_type,
+            "cycle_days": cycle_days,
+            "current_period": 1,
+            "due_date": due.isoformat() if due else None,
+            "status": "合约进行中" if item["min_periods"] > 1 else "已满最低期续租中",
+            "creator": creator,
+        }
+    save_tenants(data)
+
+    cycle_label = CYCLE_LABELS.get(cycle_type, cycle_type)
+    lines = [f"✅ 已登记 {len(items)} 个项目，续费周期：{cycle_label}"]
+    if not creator:
+        lines.append("⚠️ 你的Telegram账号没有设置username，到期提醒将无法@到你，请先在Telegram设置里加一个username。")
+    return "\n".join(lines)
+
+
+async def duedate_cycle_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cycle_type = query.data.split(":", 2)[2]
+    if cycle_type == "custom":
+        context.user_data["dd_cycle_type"] = cycle_type
+        await query.edit_message_text("请输入自定义周期天数（例如：45）：")
+        return DD_CYCLE_DAYS
+    msg = await _duedate_save(query, context, cycle_type)
+    await query.edit_message_text(msg)
+    return ConversationHandler.END
+
+
+async def duedate_cycle_days_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        days = int(update.message.text.strip())
+        if days < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("请输入正整数天数：")
+        return DD_CYCLE_DAYS
+    msg = await _duedate_save(update, context, "custom", days)
+    await update.message.reply_text(msg)
+    return ConversationHandler.END
+
+
+
+
+
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("已取消")
+    return ConversationHandler.END
+
+
+async def _reply(update: Update, text: str, reply_markup=None):
+    """统一回复：来自按钮就编辑原消息，来自文字指令就发新消息。"""
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+def total_pages(count):
+    return max(1, -(-count // PAGE_SIZE))
+
+
+def get_users_list():
+    data = load_auth()
+    items = [("id", str(i), f"🆔 {i}") for i in data["ids"]]
+    items += [("un", u, f"👤 @{u}") for u in data["usernames"]]
+    return items
+
+
+def build_users_page(page, items=None):
+    if items is None:
+        items = get_users_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    if page_items:
+        lines = [f"📋 已授权用户（共 {total} 位）— 第 {page}/{pages} 页", "", "点击用户可移除："]
+    else:
+        lines = ["📋 已授权用户（共 0 位）", "", "（暂无用户，点下方添加）"]
+    text = "\n".join(lines)
+
+    buttons = [[InlineKeyboardButton(label, callback_data=f"lu:rm:{kind}:{val}")] for kind, val, label in page_items]
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"lu:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="lu:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"lu:page:{page + 1}"))
+    buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("➕ 添加用户", callback_data="lu:add")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="lu:close")])
+
+    return text, InlineKeyboardMarkup(buttons), page
+
+
+async def listusers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb, _ = build_users_page(1)
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def listusers_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_users_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listusers_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def listusers_rm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, kind, val = query.data.split(":", 3)
+    items = get_users_list()
+    idx = next((i for i, (k, v, _) in enumerate(items) if k == kind and v == val), 0)
+    page = idx // PAGE_SIZE + 1
+    label = next((l for k, v, l in items if k == kind and v == val), val)
+
+    text = f"确定要移除 {label} 吗？"
+    buttons = [
+        [InlineKeyboardButton("✅ 确认移除", callback_data=f"lu:rmconfirm:{kind}:{val}:{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"lu:cancel:{page}")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def listusers_rmconfirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, kind, val, page = query.data.split(":", 4)
+    data = load_auth()
+    if kind == "id":
+        data["ids"] = [i for i in data["ids"] if str(i) != val]
+    else:
+        data["usernames"] = [u for u in data["usernames"] if u.lower() != val.lower()]
+    save_auth(data)
+    text, kb, _ = build_users_page(int(page))
+    await query.edit_message_text(f"✅ 已移除\n\n{text}", reply_markup=kb)
+
+
+async def listusers_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_users_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listusers_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已关闭")
+
+
+async def adduser_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        if update.callback_query:
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+        else:
+            await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await _reply(update, "请输入要授权的用户名（@开头）或用户ID（纯数字）：\n发 /cancel 取消")
+    return ADDUSER_WAIT
+
+
+async def adduser_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = update.message.text.strip()
+    data = load_auth()
+    if target.startswith("@"):
+        uname = target[1:]
+        if uname not in data["usernames"]:
+            data["usernames"].append(uname)
+    else:
+        try:
+            uid = int(target)
+        except ValueError:
+            await update.message.reply_text("格式不对，用户ID必须是纯数字，或者用 @username，请重新输入：")
+            return ADDUSER_WAIT
+        if uid not in data["ids"]:
+            data["ids"].append(uid)
+    save_auth(data)
+    text, kb, _ = build_users_page(1)
+    await update.message.reply_text(f"✅ 已授权：{target}\n\n{text}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+adduser_conv = ConversationHandler(
+    entry_points=[
+        CommandHandler("adduser", adduser_start),
+        CallbackQueryHandler(adduser_start, pattern="^lu:add$"),
+    ],
+    states={ADDUSER_WAIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adduser_receive)]},
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+async def removeuser_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await listusers_cmd(update, context)
+
+
+TARGETS_FILE = "/app/broadcast_targets.json"
+DRAFTS_FILE = "/app/broadcast_drafts.json"
+
+
+def load_targets():
+    data = load_json(TARGETS_FILE, {})
+    changed = False
+    for info in data.values():
+        if "groups" not in info:
+            old_group = info.pop("group", None)
+            info["groups"] = [old_group] if old_group else []
+            changed = True
+    if changed:
+        save_json(TARGETS_FILE, data)
+    return data
+
+
+def save_targets(data):
+    save_json(TARGETS_FILE, data)
+
+
+def load_drafts():
+    return load_json(DRAFTS_FILE, {})
+
+
+def save_drafts(data):
+    save_json(DRAFTS_FILE, data)
+
+
+def load_schedules():
+    return load_json(SCHEDULE_FILE, {})
+
+
+def save_schedules(data):
+    save_json(SCHEDULE_FILE, data)
+
+
+
+KNOWN_GROUPS_FILE = "/app/known_groups.json"
+
+
+def load_known_groups():
+    return load_json(KNOWN_GROUPS_FILE, {})
+
+
+def save_known_groups(data):
+    save_json(KNOWN_GROUPS_FILE, data)
+
+
+async def track_known_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """全局追踪：Bot在哪些群/频道出现过，攒成清单，给 /addtarget 第一步做按钮选。"""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup", "channel"):
+        return
+    data = load_known_groups()
+    data[str(chat.id)] = {"title": chat.title or "", "type": chat.type}
+    save_known_groups(data)
+
+
+async def fetch_chat_display_name(bot, chat_id: int):
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.title:
+            return chat.title
+        full_name = " ".join(filter(None, [chat.first_name, chat.last_name]))
+        return full_name or (f"@{chat.username}" if chat.username else None)
+    except (Forbidden, BadRequest):
+        return None
+
+
+def get_targets_list():
+    data = load_targets()
+    return sorted(data.items(), key=lambda kv: (",".join(sorted(kv[1].get("groups", []))), kv[1]["label"]))
+
+
+def _target_display(info: dict) -> str:
+    real = info.get("real_name")
+    label = info.get("label", "未定义")
+    groups = info.get("groups") or ["默认组"]
+    group_str = "/".join(groups)
+
+    if real and real != label:
+        return f"{real} ({label})［{group_str}］"
+    return f"{real or label}［{group_str}］"
+
+
+def build_targets_page(page, items=None):
+    if items is None:
+        items = get_targets_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    if page_items:
+        lines = [f"📋 已登记目标（共 {total} 个）— 第 {page}/{pages} 页", "", "点击可移除："]
+    else:
+        lines = ["📋 已登记目标（共 0 个）", "", "（暂无目标，点下方添加）"]
+    text = "\n".join(lines)
+
+    buttons = [
+        [InlineKeyboardButton(_target_display(info), callback_data=f"lt:rm:{cid}")]
+        for cid, info in page_items
+    ]
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"lt:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="lt:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"lt:page:{page + 1}"))
+    buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("➕ 添加目标", callback_data="lt:add")])
+    buttons.append([InlineKeyboardButton("📂 返回分类列表", callback_data="lt:catlist")])
+    buttons.append([InlineKeyboardButton("🔄 刷新群名", callback_data=f"lt:refresh:{page}")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="lt:close")])
+
+    return text, InlineKeyboardMarkup(buttons), page
+
+
+def build_category_list():
+    targets = load_targets()
+    categories = sorted({g for info in targets.values() for g in info.get("groups", [])})
+    lines = ["📂 分类管理", ""]
+    if categories:
+        lines.append(f"共 {len(categories)} 个分类，点击进入编辑成员：")
+    else:
+        lines.append("（暂无分类，点下方新建）")
+    text = "\n".join(lines)
+    buttons = [[InlineKeyboardButton(f"📁 {c}", callback_data=f"lt:cat:{c}")] for c in categories]
+    buttons.append([InlineKeyboardButton("➕ 新建分类", callback_data="lt:newcat")])
+    buttons.append([InlineKeyboardButton("➕ 添加目标", callback_data="lt:add")])
+    buttons.append([InlineKeyboardButton("🗑 管理/移除全部目标", callback_data="lt:page:1")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="lt:close")])
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def _category_matrix(category, page, pending):
+    items = get_targets_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    lines = [f"「{category}」分类编辑 已勾选 {len(pending)}", ""]
+    rows = []
+    btn_row = []
+    for i, (cid, info) in enumerate(page_items):
+        num = start + i + 1
+        checked = "☑" if cid in pending else "☐"
+        real = info.get("real_name")
+        label = info.get("label", "未定义")
+        name = real or label
+        lines.append(f"{checked} {num} {name}")
+        btn_row.append(InlineKeyboardButton(str(num), callback_data=f"lt:tg:{cid}"))
+        if len(btn_row) == 5:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+
+    lines.append("")
+    lines.append(f"▶第({page})页 共计{total}条")
+    text = "\n".join(lines)
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"lt:catpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"第{page}/{pages}页", callback_data="lt:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"lt:catpage:{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("💾 保存", callback_data="lt:catsave")])
+    rows.append([InlineKeyboardButton("🔙 返回", callback_data="lt:catback")])
+    return text, InlineKeyboardMarkup(rows), page
+
+
+async def category_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("lt_cat", None)
+    context.user_data.pop("lt_cat_pending", None)
+    context.user_data.pop("lt_cat_page", None)
+    text, kb = build_category_list()
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def category_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = query.data.split(":", 2)[2]
+    targets = load_targets()
+    pending = {cid for cid, info in targets.items() if name in info.get("groups", [])}
+    context.user_data["lt_cat"] = name
+    context.user_data["lt_cat_pending"] = pending
+    context.user_data["lt_cat_page"] = 1
+    text, kb, _ = _category_matrix(name, 1, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def category_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = context.user_data.get("lt_cat")
+    if not name:
+        await query.edit_message_text("会话已过期，请重新 /listtargets")
+        return
+    page = int(query.data.split(":", 2)[2])
+    pending = context.user_data.get("lt_cat_pending", set())
+    context.user_data["lt_cat_page"] = page
+    text, kb, _ = _category_matrix(name, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def category_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = context.user_data.get("lt_cat")
+    if not name:
+        await query.edit_message_text("会话已过期，请重新 /listtargets")
+        return
+    cid = query.data.split(":", 2)[2]
+    pending = context.user_data.setdefault("lt_cat_pending", set())
+    if cid in pending:
+        pending.discard(cid)
+    else:
+        pending.add(cid)
+    page = context.user_data.get("lt_cat_page", 1)
+    text, kb, _ = _category_matrix(name, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def category_save_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    name = context.user_data.pop("lt_cat", None)
+    pending = context.user_data.pop("lt_cat_pending", set())
+    context.user_data.pop("lt_cat_page", None)
+    if not name:
+        await query.answer()
+        await query.edit_message_text("会话已过期，请重新 /listtargets")
+        return
+    await query.answer("已保存")
+    data = load_targets()
+    for cid, info in data.items():
+        groups = set(info.get("groups", []))
+        if cid in pending:
+            groups.add(name)
+        else:
+            groups.discard(name)
+        info["groups"] = sorted(groups)
+    save_targets(data)
+    text, kb = build_category_list()
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def category_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("lt_cat", None)
+    context.user_data.pop("lt_cat_pending", None)
+    context.user_data.pop("lt_cat_page", None)
+    text, kb = build_category_list()
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+NEWCAT_NAME = 300
+
+
+async def newcat_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("请输入新分类名称：\n发 /cancel 取消")
+    return NEWCAT_NAME
+
+
+async def newcat_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    context.user_data["lt_cat"] = name
+    context.user_data["lt_cat_pending"] = set()
+    context.user_data["lt_cat_page"] = 1
+    text, kb, _ = _category_matrix(name, 1, set())
+    await update.message.reply_text(f"✅ 新分类「{name}」，勾选成员后点保存生效：\n\n{text}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+newcat_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(newcat_start_cb, pattern="^lt:newcat$")],
+    states={
+        NEWCAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, newcat_receive_name)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+async def listtargets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb = build_category_list()
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def listtargets_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_targets_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listtargets_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def listtargets_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("正在刷新群名...")
+    page = int(query.data.split(":")[2])
+
+    data = load_targets()
+    updated, failed = 0, 0
+    for cid_str in list(data.keys()):
+        name = await fetch_chat_display_name(context.bot, int(cid_str))
+        if name:
+            data[cid_str]["real_name"] = name
+            updated += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)
+    save_targets(data)
+
+    text, kb, _ = build_targets_page(page)
+    prefix = f"🔄 刷新完成：成功 {updated} 个"
+    if failed:
+        prefix += f"，{failed} 个查不到（可能Bot已被移出该群）"
+    await query.edit_message_text(f"{prefix}\n\n{text}", reply_markup=kb)
+
+
+async def listtargets_rm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cid = query.data.split(":", 2)[2]
+    items = get_targets_list()
+    idx = next((i for i, (c, _) in enumerate(items) if c == cid), 0)
+    page = idx // PAGE_SIZE + 1
+    info = next((info for c, info in items if c == cid), None)
+    label = _target_display(info) if info else cid
+
+    text = f"确定要移除「{label}」（ID: {cid}）吗？"
+    buttons = [
+        [InlineKeyboardButton("✅ 确认移除", callback_data=f"lt:rmconfirm:{cid}:{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"lt:cancel:{page}")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def listtargets_rmconfirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, cid, page = query.data.split(":", 3)
+    data = load_targets()
+    removed = data.pop(cid, None)
+    save_targets(data)
+    text, kb, _ = build_targets_page(int(page))
+    prefix = f"✅ 已移除：{_target_display(removed)}\n\n" if removed else ""
+    await query.edit_message_text(f"{prefix}{text}", reply_markup=kb)
+
+
+async def listtargets_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_targets_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listtargets_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已关闭")
+
+
+async def addtarget_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        if update.callback_query:
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+        else:
+            await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+
+    known = load_known_groups()
+    if not known:
+        await _reply(
+            update,
+            "第1步：请输入聊天室ID\n"
+            "（还没追踪到任何群——Bot需要先在目标群里收到过至少一条消息才能自动识别。"
+            "也可以手动输入：把Bot拉进那个群/频道，在群里发一条消息，"
+            "然后私聊Bot发 /whereami 并转发那条消息过来）\n"
+            "发 /cancel 取消",
+        )
+        return ADDTARGET_ID
+
+    buttons = [
+        [InlineKeyboardButton(info.get("title") or cid, callback_data=f"at:pick:{cid}")]
+        for cid, info in known.items()
+    ]
+    buttons.append([InlineKeyboardButton("✍️ 手动输入群ID", callback_data="at:manual")])
+    await _reply(update, "第1步：选择要登记的群组，或手动输入ID：", reply_markup=InlineKeyboardMarkup(buttons))
+    return ADDTARGET_ID
+
+
+async def _addtarget_after_id(send_func, context: ContextTypes.DEFAULT_TYPE, chat_id: int, real_name):
+    if real_name is None:
+        await send_func(
+            "⚠️ 查不到真实群名（可能Bot还没加入该群）。"
+            "仍会继续，稍后可点「🔄 刷新群名」。"
+        )
+    else:
+        await send_func(f"✅ 已识别真实群名：{real_name}")
+
+    context.user_data["at_id"] = chat_id
+    context.user_data["at_real_name"] = real_name
+    context.user_data["at_groups"] = set()
+
+    return await _show_group_multiselect(send_func, context)
+
+
+def _all_known_groups(extra=None):
+    groups = set()
+    for info in load_targets().values():
+        groups.update(info.get("groups", []))
+    if extra:
+        groups.update(extra)
+    return sorted(groups)
+
+
+async def _show_group_multiselect(send_func, context: ContextTypes.DEFAULT_TYPE):
+    selected = context.user_data.setdefault("at_groups", set())
+    all_groups = _all_known_groups(selected)
+    buttons = [
+        [InlineKeyboardButton(("✅ " if g in selected else "⬜ ") + g, callback_data=f"at:grp:{g}")]
+        for g in all_groups
+    ]
+    if selected:
+        buttons.append([InlineKeyboardButton(f"✅ 完成（已选 {len(selected)} 个分组）", callback_data="at:grp:done")])
+    hint = "，也可以继续输入新分组名" if all_groups else ""
+    selected_str = "、".join(sorted(selected)) if selected else "（无）"
+    text = f"第2步：点击切换勾选分组{hint}，未选择时请直接输入新分组名：\n已选：{selected_str}"
+    if buttons:
+        await send_func(text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await send_func(text)
+    return ADDTARGET_GROUP
+
+
+async def addtarget_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split(":", 2)[2])
+    known = load_known_groups()
+    info = known.get(str(chat_id), {})
+    real_name = info.get("title") or await fetch_chat_display_name(context.bot, chat_id)
+    return await _addtarget_after_id(query.edit_message_text, context, chat_id, real_name)
+
+
+async def addtarget_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "请输入聊天室ID：\n"
+        "（不知道ID的话：把Bot拉进那个群/频道，在群里发一条消息，"
+        "然后私聊Bot发 /whereami 并转发那条消息过来）"
+    )
+    return ADDTARGET_ID
+
+
+async def addtarget_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("聊天室ID必须是数字，请重新输入：")
+        return ADDTARGET_ID
+
+    real_name = await fetch_chat_display_name(context.bot, chat_id)
+    return await _addtarget_after_id(update.message.reply_text, context, chat_id, real_name)
+
+
+async def _ask_label(send_edit_or_reply, prefix=""):
+    buttons = [[InlineKeyboardButton("⏭ 跳过（用真实群名/分组名当备注）", callback_data="at:skiplabel")]]
+    await send_edit_or_reply(f"{prefix}第3步：请输入自定义备注名，或点击跳过：", reply_markup=InlineKeyboardMarkup(buttons))
+    return ADDTARGET_LABEL
+
+
+async def addtarget_group_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    g = query.data.split(":", 2)[2]
+    selected = context.user_data.setdefault("at_groups", set())
+    if g in selected:
+        selected.discard(g)
+    else:
+        selected.add(g)
+    return await _show_group_multiselect(query.edit_message_text, context)
+
+
+async def addtarget_group_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    selected = context.user_data.get("at_groups", set())
+    if not selected:
+        await query.answer("请至少选择一个分组", show_alert=True)
+        return ADDTARGET_GROUP
+    await query.answer()
+    return await _ask_label(query.edit_message_text, prefix=f"分组：{'、'.join(sorted(selected))}\n\n")
+
+
+async def addtarget_receive_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    selected = context.user_data.setdefault("at_groups", set())
+    selected.add(name)
+    return await _show_group_multiselect(update.message.reply_text, context)
+
+
+async def _addtarget_save(update: Update, context: ContextTypes.DEFAULT_TYPE, label: str):
+    chat_id = context.user_data.pop("at_id")
+    groups = sorted(context.user_data.pop("at_groups", set()))
+    real_name = context.user_data.pop("at_real_name", None)
+    data = load_targets()
+    data[str(chat_id)] = {"groups": groups, "label": label, "real_name": real_name}
+    save_targets(data)
+    text, kb, _ = build_targets_page(1)
+    shown_name = f"{real_name} ({label})" if real_name else label
+    group_str = "、".join(groups) if groups else "（无分组）"
+    msg = f"✅ 已登记：{shown_name}（ID: {chat_id}）→ 分组「{group_str}」\n\n{text}"
+    await _reply(update, msg, reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def addtarget_receive_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _addtarget_save(update, context, update.message.text.strip())
+
+
+async def addtarget_skip_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    fallback = context.user_data.get("at_real_name") or context.user_data.get("at_group", "")
+    return await _addtarget_save(update, context, fallback)
+
+
+async def addtarget_skiplabel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    fallback = context.user_data.get("at_real_name") or context.user_data.get("at_group", "")
+    return await _addtarget_save(update, context, fallback)
+
+
+addtarget_conv = ConversationHandler(
+    entry_points=[
+        CommandHandler("addtarget", addtarget_start),
+        CallbackQueryHandler(addtarget_start, pattern="^lt:add$"),
+    ],
+    states={
+        ADDTARGET_ID: [
+            CallbackQueryHandler(addtarget_pick_cb, pattern="^at:pick:"),
+            CallbackQueryHandler(addtarget_manual_cb, pattern="^at:manual$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_id),
+        ],
+        ADDTARGET_GROUP: [
+            CallbackQueryHandler(addtarget_group_done_cb, pattern="^at:grp:done$"),
+            CallbackQueryHandler(addtarget_group_toggle_cb, pattern="^at:grp:"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_group),
+        ],
+        ADDTARGET_LABEL: [
+            CommandHandler("skip", addtarget_skip_label),
+            CallbackQueryHandler(addtarget_skiplabel_cb, pattern="^at:skiplabel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_label),
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+async def removetarget_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await listtargets_cmd(update, context)
+
+
+async def whereami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return
+    await update.message.reply_text(
+        f"这个聊天室的ID是：\n`{update.effective_chat.id}`",
+        parse_mode="Markdown",
+    )
+
+
+def get_drafts_list():
+    return sorted(load_drafts().items(), key=lambda kv: kv[0])
+
+
+def build_drafts_page(page, items=None):
+    if items is None:
+        items = get_drafts_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    if page_items:
+        lines = [f"📋 文案库（共 {total} 份）— 第 {page}/{pages} 页", "", "点击可删除："]
+    else:
+        lines = ["📋 文案库（共 0 份）", "", "（暂无文案，点下方添加）"]
+    text = "\n".join(lines)
+
+    buttons = []
+    for i, (name, content) in enumerate(page_items, start=start):
+        preview = content if len(content) <= 15 else content[:15] + "..."
+        buttons.append([InlineKeyboardButton(f"📄 {name}：{preview}", callback_data=f"ld:rm:{i}")])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"ld:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="ld:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"ld:page:{page + 1}"))
+    buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("➕ 添加文案", callback_data="ld:add")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="ld:close")])
+
+    return text, InlineKeyboardMarkup(buttons), page
+
+
+async def listdrafts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb, _ = build_drafts_page(1)
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def listdrafts_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_drafts_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listdrafts_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def listdrafts_rm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[2])
+    items = get_drafts_list()
+    if idx >= len(items):
+        text, kb, _ = build_drafts_page(1, items)
+        await query.edit_message_text("该文案已不存在\n\n" + text, reply_markup=kb)
+        return
+    name, content = items[idx]
+    page = idx // PAGE_SIZE + 1
+    preview = content if len(content) <= 100 else content[:100] + "..."
+    text = f"确定要删除文案「{name}」吗？\n\n{preview}"
+    buttons = [
+        [InlineKeyboardButton("✅ 确认删除", callback_data=f"ld:rmconfirm:{idx}:{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"ld:cancel:{page}")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def listdrafts_rmconfirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, idx, page = query.data.split(":", 3)
+    idx = int(idx)
+    items = get_drafts_list()
+    removed_name = None
+    if idx < len(items):
+        removed_name = items[idx][0]
+        data = load_drafts()
+        data.pop(removed_name, None)
+        save_drafts(data)
+    text, kb, _ = build_drafts_page(int(page))
+    prefix = f"✅ 已删除「{removed_name}」\n\n" if removed_name else ""
+    await query.edit_message_text(f"{prefix}{text}", reply_markup=kb)
+
+
+async def listdrafts_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_drafts_page(page)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def listdrafts_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已关闭")
+
+
+async def adddraft_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        if update.callback_query:
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+        else:
+            await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await _reply(update, "第1步：请输入文案名称（标签/名字）\n发 /cancel 取消")
+    return ADDDRAFT_NAME
+
+
+async def adddraft_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["ad_name"] = update.message.text.strip()
+    await update.message.reply_text("第2步：请输入文案内容")
+    return ADDDRAFT_CONTENT
+
+
+async def adddraft_receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = context.user_data.pop("ad_name")
+    content = update.message.text
+    data = load_drafts()
+    data[name] = content
+    save_drafts(data)
+    text, kb, _ = build_drafts_page(1)
+    await update.message.reply_text(f"✅ 已保存文案「{name}」\n\n{text}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+adddraft_conv = ConversationHandler(
+    entry_points=[
+        CommandHandler("adddraft", adddraft_start),
+        CallbackQueryHandler(adddraft_start, pattern="^ld:add$"),
+    ],
+    states={
+        ADDDRAFT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, adddraft_receive_name)],
+        ADDDRAFT_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adddraft_receive_content)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """【步骤 1】：先选择/配置定时 Schedule 或 立即发送"""
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+
+    targets = load_targets()
+    if not targets:
+        await update.message.reply_text("还没有登记任何群发目标，请先用 /addtarget 添加")
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton("🚀 立即发送", callback_data="bc_time:now")],
+        [InlineKeyboardButton("⏰ 管理/新建定时任务 (Schedule)", callback_data="bc_time:sched")],
+        [InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")]
+    ]
+
+    await _reply(update, "📌【步骤 1/4】请选择广播发送的时间方式：", reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_TIMING_MENU
+
+
+async def bc_timing_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "bc_cancel":
+        await query.edit_message_text("已取消群发操作")
+        return ConversationHandler.END
+
+    if data == "bc_time:now":
+        context.user_data["bc_timing_type"] = "now"
+        context.user_data["bc_time_val"] = None
+        return await _ask_group_step(query.edit_message_text, context)
+
+    if data == "bc_time:sched":
+        return await _show_schedule_list(query.edit_message_text)
+
+
+async def _show_schedule_list(send_func):
+    """显示已有 Schedule 菜单（查看、编辑/删除、新增）"""
+    schedules = load_schedules()
+    buttons = []
+
+    text = "⏰ **当前已设定的定时 Schedule 列表**：\n\n"
+    if not schedules:
+        text += "（暂无任何定时计划）\n"
+    else:
+        for sid, sinfo in schedules.items():
+            stype = "每日循环" if sinfo["type"] == "daily" else "单次定时"
+            time_str = sinfo["time"]
+            text += f"🔹 [{stype}] 对应时间：`{time_str}`\n"
+            buttons.append([
+                InlineKeyboardButton(f"✏️ 选用/编辑 {time_str}", callback_data=f"sched_select:{sid}"),
+                InlineKeyboardButton(f"🗑️ 删除", callback_data=f"sched_del:{sid}")
+            ])
+
+    buttons.append([InlineKeyboardButton("➕ 添加「单次定时」时间", callback_data="sched_add:once")])
+    buttons.append([InlineKeyboardButton("🔄 添加「每日固定时间」循环", callback_data="sched_add:daily")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    await send_func(text, reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_SCHED_ACTION
+
+
+async def bc_sched_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "bc_cancel":
+        await query.edit_message_text("已取消")
+        return ConversationHandler.END
+
+    if data.startswith("sched_del:"):
+        sid = data.split(":")[1]
+        schedules = load_schedules()
+        schedules.pop(sid, None)
+        save_schedules(schedules)
+        await query.answer("已删除该定时设置", show_alert=True)
+        return await _show_schedule_list(query.edit_message_text)
+
+    if data.startswith("sched_select:"):
+        sid = data.split(":")[1]
+        schedules = load_schedules()
+        sinfo = schedules.get(sid)
+        if sinfo:
+            context.user_data["bc_timing_type"] = sinfo["type"]
+            context.user_data["bc_time_val"] = sinfo["time"]
+            return await _ask_group_step(query.edit_message_text, context)
+
+    if data.startswith("sched_add:"):
+        stype = data.split(":")[1]
+        context.user_data["temp_sched_type"] = stype
+        if stype == "daily":
+            await query.edit_message_text("请输入每日固定的时间，格式为：HH:MM（例如：09:30）")
+        else:
+            await query.edit_message_text("请输入具体发送日期时间，格式为：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）")
+        return BC_INPUT_TIME
+
+
+async def bc_input_time_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    stype = context.user_data.get("temp_sched_type", "once")
+
+    if stype == "daily":
+        try:
+            time.fromisoformat(text)
+        except ValueError:
+            await update.message.reply_text("格式不正确，请输入正确的24小时制时间（例如：09:30）：")
+            return BC_INPUT_TIME
+    else:
+        try:
+            dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
+            if dt <= datetime.now():
+                await update.message.reply_text("该时间已过去，请输入未来的时间：")
+                return BC_INPUT_TIME
+        except ValueError:
+            await update.message.reply_text("格式不正确，请输入：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）：")
+            return BC_INPUT_TIME
+
+    schedules = load_schedules()
+    sid = str(int(datetime.now().timestamp()))
+    schedules[sid] = {"type": stype, "time": text}
+    save_schedules(schedules)
+
+    context.user_data["bc_timing_type"] = stype
+    context.user_data["bc_time_val"] = text
+
+    await update.message.reply_text(f"✅ 定时保存成功！")
+    return await _ask_group_step(update.message.reply_text, context)
+
+
+async def _ask_group_step(send_func, context):
+    """【步骤 2】：选择目标分组"""
+    targets = load_targets()
+    groups = sorted({g for info in targets.values() for g in info.get("groups", [])})
+    buttons = [[InlineKeyboardButton(g, callback_data=f"bc_grp:{g}")] for g in groups]
+    buttons.append([InlineKeyboardButton("📢 全部分组", callback_data="bc_grp:__ALL__")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    await send_func("👥【步骤 2/4】请选择要发送的**目标群体分组**：", reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_CHOOSE_GROUP
+
+
+async def bc_choose_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "bc_cancel":
+        await query.edit_message_text("已取消")
+        return ConversationHandler.END
+
+    group = query.data.split(":", 1)[1]
+    context.user_data["bc_group"] = group
+
+    """【步骤 3】：选择新/旧文案模板"""
+    drafts = load_drafts()
+    buttons = [[InlineKeyboardButton("✍️ 临时编写新文案", callback_data="bc_src:new")]]
+    if drafts:
+        buttons.append([InlineKeyboardButton("📄 选择已有文案模板", callback_data="bc_src:draft")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    label = "全部分组" if group == "__ALL__" else group
+    await query.edit_message_text(
+        f"目标分组：`{label}`\n\n📝【步骤 3/4】请选择**文案来源**：",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return BC_CHOOSE_SOURCE
+
+
+async def bc_choose_source_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "bc_cancel":
+        await query.edit_message_text("已取消")
+        return ConversationHandler.END
+
+    if query.data == "bc_src:new":
+        await query.edit_message_text("请输入要群发的文案内容：")
+        return BC_TYPING_CONTENT
+
+    """【步骤 4】：选择文案标签（从模板库选择）"""
+    drafts = load_drafts()
+    buttons = [[InlineKeyboardButton(f"🏷️ {name}", callback_data=f"bc_draft:{name}")] for name in drafts]
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+    await query.edit_message_text("🏷️【步骤 4/4】请选择对应的**文案标签**：", reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_CHOOSE_DRAFT
+
+
+async def bc_choose_draft_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "bc_cancel":
+        await query.edit_message_text("已取消")
+        return ConversationHandler.END
+
+    name = query.data.split(":", 1)[1]
+    drafts = load_drafts()
+    context.user_data["bc_draft_tag"] = name
+    context.user_data["bc_content"] = drafts.get(name, "")
+    return await _show_confirm(query.edit_message_text, context)
+
+
+async def bc_typing_content_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["bc_draft_tag"] = "临时自定义文案"
+    context.user_data["bc_content"] = update.message.text
+    return await _show_confirm(update.message.reply_text, context)
+
+
+async def _show_confirm(send_func, context):
+    group = context.user_data.get("bc_group")
+    content = context.user_data.get("bc_content", "")
+    timing_type = context.user_data.get("bc_timing_type")
+    time_val = context.user_data.get("bc_time_val")
+    tag = context.user_data.get("bc_draft_tag", "自定义")
+
+    group_label = "全部分组" if group == "__ALL__" else group
+    if timing_type == "now":
+        when_label = "🚀 立即发送"
+    elif timing_type == "daily":
+        when_label = f"🔄 每日固定 {time_val} 循环群发"
+    else:
+        when_label = f"⏰ 指定时间 {time_val}"
+
+    preview = content if len(content) <= 150 else content[:150] + "..."
+
+    summary = (
+        f"📋 **请核对最终群发配置**：\n\n"
+        f"1️⃣ **发送时间**：{when_label}\n"
+        f"2️⃣ **目标群体分组**：{group_label}\n"
+        f"3️⃣ **文案标签**：{tag}\n"
+        f"4️⃣ **预览内容**：\n{preview}"
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ 确认并启动", callback_data="bc_confirm:yes")],
+        [InlineKeyboardButton("❌ 取消", callback_data="bc_confirm:no")],
+    ]
+    await send_func(summary, reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_CONFIRM
+
+
+async def bc_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "bc_confirm:no":
+        await query.edit_message_text("已取消操作")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    group = context.user_data["bc_group"]
+    content = context.user_data["bc_content"]
+    timing_type = context.user_data["bc_timing_type"]
+    time_val = context.user_data["bc_time_val"]
+    admin_chat_id = update.effective_chat.id
+
+    if timing_type == "now":
+        await query.edit_message_text("🚀 开始进行即时群发...")
+        await do_broadcast(context.bot, group, content, admin_chat_id)
+    elif timing_type == "daily":
+        t_obj = time.fromisoformat(time_val)
+        context.job_queue.run_daily(
+            scheduled_broadcast_job,
+            time=t_obj,
+            data={"group": group, "content": content, "admin_chat_id": admin_chat_id},
+        )
+        await query.edit_message_text(f"✅ 每日循环任务已设置！每日 `{time_val}` 准时发送。")
+    else:
+        dt = datetime.strptime(time_val, "%Y-%m-%d %H:%M")
+        delay_seconds = (dt - datetime.now()).total_seconds()
+        context.job_queue.run_once(
+            scheduled_broadcast_job,
+            when=delay_seconds,
+            data={"group": group, "content": content, "admin_chat_id": admin_chat_id},
+        )
+        await query.edit_message_text(f"⏰ 单次定时任务已设定，将在 `{time_val}` 触发发送。")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    d = context.job.data
+    await do_broadcast(context.bot, d["group"], d["content"], d["admin_chat_id"])
+
+
+async def do_broadcast(bot, group, content, admin_chat_id):
+    targets = load_targets()
+    if group == "__ALL__":
+        chat_ids = [int(cid) for cid in targets.keys()]
+    else:
+        chat_ids = [int(cid) for cid, info in targets.items() if group in info.get("groups", [])]
+    success, failed = 0, []
+    migrated = {}
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id=chat_id, text=content)
+            success += 1
+        except ChatMigrated as e:
+            new_id = e.new_chat_id
+            migrated[chat_id] = new_id
+            try:
+                await bot.send_message(chat_id=new_id, text=content)
+                success += 1
+            except (Forbidden, BadRequest) as e2:
+                failed.append(f"{chat_id}→{new_id}（{e2.message}）")
+        except (Forbidden, BadRequest) as e:
+            failed.append(f"{chat_id}（{e.message}）")
+        await asyncio.sleep(0.05)
+    if migrated:
+        data = load_targets()
+        for old_id, new_id in migrated.items():
+            info = data.pop(str(old_id), None)
+            if info:
+                data[str(new_id)] = info
+        save_targets(data)
+    report = f"✅ 群发完成\n成功：{success}\n失败：{len(failed)}"
+    if migrated:
+        report += f"\n\n🔄 有 {len(migrated)} 个群升级为超级群，ID已自动更新：\n" + "\n".join(f"{o}→{n}" for o, n in migrated.items())
+    if failed:
+        report += "\n\n失败详情：\n" + "\n".join(failed[:20])
+    await bot.send_message(chat_id=admin_chat_id, text=report)
+
+
+broadcast_conv = ConversationHandler(
+    entry_points=[CommandHandler("broadcast", broadcast_start)],
+    states={
+        BC_TIMING_MENU: [CallbackQueryHandler(bc_timing_menu_cb, pattern="^bc_time:")],
+        BC_SCHED_ACTION: [CallbackQueryHandler(bc_sched_action_cb)],
+        BC_INPUT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_input_time_receive)],
+        BC_CHOOSE_GROUP: [CallbackQueryHandler(bc_choose_group_cb, pattern="^bc_grp:")],
+        BC_CHOOSE_SOURCE: [CallbackQueryHandler(bc_choose_source_cb, pattern="^bc_src:")],
+        BC_TYPING_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_typing_content_receive)],
+        BC_CHOOSE_DRAFT: [CallbackQueryHandler(bc_choose_draft_cb, pattern="^bc_draft:")],
+        BC_CONFIRM: [CallbackQueryHandler(bc_confirm_cb, pattern="^bc_confirm:")],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation), CallbackQueryHandler(cancel_conversation, pattern="^bc_cancel$")],
+)
+
+LEDGER_SETTINGS_FILE = "/app/ledger_settings.json"
+LEDGER_ENTRIES_FILE = "/app/ledger_entries.json"
+
+DEFAULT_LEDGER_SETTINGS = {
+    "in_fee": 0,
+    "out_fee": 0,
+    "rates": {},
+    "currency": "USDT",
+    "tz_offset": 8,
+    "disburse_fee": 0,
+    "period_start": None,
+    "period_label": None,
+}
+
+def load_ledger_settings():
+    return load_json(LEDGER_SETTINGS_FILE, {})
+
+def save_ledger_settings(data):
+    save_json(LEDGER_SETTINGS_FILE, data)
+
+def get_group_ledger_settings(chat_id) -> dict:
+    data = load_ledger_settings()
+    stored = data.get(str(chat_id), {})
+    merged = dict(DEFAULT_LEDGER_SETTINGS)
+    merged.update(stored)
+    return merged
+
+def get_currency_rate(settings, currency):
+    """取某个币种的汇率设置，没设置过的默认×1。"""
+    r = settings.get("rates", {}).get(currency)
+    if not r:
+        return 1, "multiply"
+    return r["value"], r["mode"]
+
+def set_group_ledger_setting(chat_id, key, value):
+    data = load_ledger_settings()
+    cid = str(chat_id)
+    if cid not in data:
+        data[cid] = dict(DEFAULT_LEDGER_SETTINGS)
+    data[cid][key] = value
+    save_ledger_settings(data)
+
+def load_ledger_entries():
+    return load_json(LEDGER_ENTRIES_FILE, {})
+
+def save_ledger_entries(data):
+    save_json(LEDGER_ENTRIES_FILE, data)
+
+def append_ledger_entry(chat_id, entry: dict):
+    data = load_ledger_entries()
+    key = str(chat_id)
+    data.setdefault(key, [])
+    data[key].append(entry)
+    save_ledger_entries(data)
+
+def get_ledger_tz(settings: dict):
+    offset_hours = settings.get("tz_offset", 8)
+    return timezone(timedelta(hours=offset_hours))
+
+def get_today_totals(chat_id, tz):
+    """返回 (入账字典, 出账字典)，都是按币种分类，例如 {"AUD": 1000.0, "USDT": 1200.0}。"""
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    period_start_str = get_period_start_str(chat_id, tz)
+    in_totals, out_totals = {}, {}
+    for e in entries:
+        if e.get("time", "") >= period_start_str and not e.get("voided"):
+            cur = e.get("currency", "USDT")
+            if e["type"] == "in":
+                in_totals[cur] = in_totals.get(cur, 0.0) + e["converted_amount"]
+            elif e["type"] == "out":
+                out_totals[cur] = out_totals.get(cur, 0.0) + e["converted_amount"]
+    return in_totals, out_totals
+
+def get_today_entries_split(chat_id, tz):
+    """返回当前账期的 (入账列表, 出账列表)，按时间正序排列。"""
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    period_start_str = get_period_start_str(chat_id, tz)
+    today_entries = [e for e in entries if e.get("time", "") >= period_start_str and not e.get("voided")]
+    ins = [e for e in today_entries if e["type"] == "in"]
+    outs = [e for e in today_entries if e["type"] == "out"]
+    return ins, outs
+
+def get_today_disburse(chat_id, tz):
+    """返回当前账期的下发记录列表，和按币种分类的净额合计字典。"""
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    period_start_str = get_period_start_str(chat_id, tz)
+    items = [e for e in entries if e.get("time", "") >= period_start_str and e.get("type") == "disburse" and not e.get("voided")]
+    net_totals = {}
+    for e in items:
+        cur = e.get("currency", "USDT")
+        net_totals[cur] = net_totals.get(cur, 0.0) + e["net_amount"]
+    return items, net_totals
+
+LEDGER_GLOBAL_FILE = "/app/ledger_global.json"
+
+def load_ledger_global():
+    return load_json(LEDGER_GLOBAL_FILE, {})
+
+
+def save_ledger_global(data):
+    save_json(LEDGER_GLOBAL_FILE, data)
+
+
+async def scheduled_ledger_autoclose(context: ContextTypes.DEFAULT_TYPE):
+    """全局定时任务：对所有有记账数据的群依次结束账单。"""
+    settings_all = load_ledger_settings()
+    entries_all = load_ledger_entries()
+    chat_ids = set(settings_all.keys()) | set(entries_all.keys())
+    for cid in chat_ids:
+        try:
+            chat_id = int(cid)
+        except ValueError:
+            continue
+        try:
+            grand_totals, next_label = close_ledger_day(chat_id)
+            if isinstance(grand_totals, dict):
+                gt_str = " | ".join([f"{cur}: {_fmt_num(val)}" for cur, val in grand_totals.items()])
+            else:
+                gt_str = _fmt_num(grand_totals)
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⏰ 自动结算完成！\n\n"
+                    f"📊 **本期结转总额**：`{gt_str}`\n"
+                    f"📅 **新账期日期**：{next_label}"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            continue
+
+def schedule_ledger_autoclose(application, time_str, tz_offset=8):
+    hh, mm = time_str.split(":")
+    tz = timezone(timedelta(hours=tz_offset))
+    run_time = dt_time(hour=int(hh), minute=int(mm), tzinfo=tz)
+    for job in application.job_queue.get_jobs_by_name("ledger_autoclose"):
+        job.schedule_removal()
+    application.job_queue.run_daily(scheduled_ledger_autoclose, time=run_time, name="ledger_autoclose")
+
+LEDGER_CARRYOVER_FILE = "/app/ledger_carryover.json"
+LEDGER_CLOSE_SNAPSHOT_FILE = "/app/ledger_close_snapshot.json"
+LEDGER_CLEAR_SNAPSHOT_FILE = "/app/ledger_clear_snapshot.json"
+
+def load_clear_snapshots():
+    return load_json(LEDGER_CLEAR_SNAPSHOT_FILE, {})
+
+def save_clear_snapshots(data):
+    save_json(LEDGER_CLEAR_SNAPSHOT_FILE, data)
+
+def load_ledger_carryover():
+    return load_json(LEDGER_CARRYOVER_FILE, {})
+
+def save_ledger_carryover(data):
+    save_json(LEDGER_CARRYOVER_FILE, data)
+
+def load_close_snapshots():
+    return load_json(LEDGER_CLOSE_SNAPSHOT_FILE, {})
+
+def save_close_snapshots(data):
+    save_json(LEDGER_CLOSE_SNAPSHOT_FILE, data)
+
+def get_group_carryover(chat_id) -> dict:
+    """结转余额，按币种分类，例如 {"AUD": 600.0, "USDT": 700.0}。"""
+    data = load_ledger_carryover()
+    return data.get(str(chat_id), {})
+
+
+def set_group_carryover(chat_id, currency_totals: dict):
+    """整体覆盖写入这个群的结转余额字典。"""
+    data = load_ledger_carryover()
+    data[str(chat_id)] = {k: round(v, 4) for k, v in currency_totals.items()}
+    save_ledger_carryover(data)
+
+
+def add_group_carryover(chat_id, currency, delta):
+    """给某一个币种的结转余额单独加一个增量（其他币种不受影响）。"""
+    totals = get_group_carryover(chat_id)
+    totals[currency] = round(totals.get(currency, 0.0) + delta, 4)
+    set_group_carryover(chat_id, totals)
+
+def get_period_start_str(chat_id, tz):
+    """当前账期起点（字符串，格式与entry["time"]一致，可直接做字符串比较）。
+    只有第一次调用（还没结束过任何账单）时才会确定这个起点，
+    之后完全靠「结束账单」/自动结算来推进，不会跟着系统日期自己跑。"""
+    settings = get_group_ledger_settings(chat_id)
+    ps = settings.get("period_start")
+    if ps:
+        return ps
+
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    if entries:
+        ps = min(e["time"] for e in entries)
+    else:
+        ps = datetime.now(tz).strftime("%Y-%m-%d 00:00:00")
+
+    set_group_ledger_setting(chat_id, "period_start", ps)
+    return ps
+
+def get_period_label(chat_id, tz):
+    """账期显示用的日期文字。"""
+    settings = get_group_ledger_settings(chat_id)
+    label = settings.get("period_label")
+    if label:
+        return label
+    return datetime.now(tz).strftime("%Y-%m-%d")
+def format_disburse_line(entry):
+    time_str = entry["time"][11:16]
+    display_amount = _fmt_num(entry["amount"])
+    display_net = _fmt_num(entry["net_amount"])
+    fee = entry.get("fee_flat", 0)
+    if fee:
+        line = f"`{time_str}` {display_amount} (手续费{_fmt_num(fee)}) = {display_net}"
+    else:
+        line = f"`{time_str}` {display_amount}  = {display_net}"
+    if entry.get("note"):
+        line += f"     {entry['note']}"
+    return line
+
+async def try_handle_ledger_disburse(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """尝试匹配「下发」指令：下发 -2000 / 下发 2000，可带备注。
+    可选写「手续X」单独指定这一笔的手续费，写了就不管正负数都生效，覆盖默认值；
+    没写「手续X」时，只有负数下发才吃默认手续费，正数下发默认不扣。"""
+    m = RE_LEDGER_DISBURSE.match(text)
+    if not m:
+        return False
+    amount_str, fee_override_str, note = m.groups()
+    amount = float(amount_str)
+    note = note.strip()
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+
+    if fee_override_str is not None:
+        fee = float(fee_override_str)
+    else:
+        fee = settings.get("disburse_fee", 0) if amount < 0 else 0
+
+    net_amount = amount - fee
+
+
+    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    operator_name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+
+    entry = {
+        "type": "disburse",
+        "amount": amount,
+        "fee_flat": fee,
+        "net_amount": round(net_amount, 4),
+        "currency": settings["currency"],
+        "note": note,
+        "operator_id": user.id,
+        "operator_name": operator_name,
+        "time": now_str,
+    }
+
+    data_now = load_ledger_entries()
+    entry["id"] = len(data_now.get(str(chat_id), [])) + 1
+    entry["voided"] = False
+    entry["user_message_id"] = update.message.message_id
+    append_ledger_entry(chat_id, entry)
+
+    summary_text, summary_kb = build_ledger_summary(chat_id)
+    sent = await update.message.reply_text(summary_text, reply_markup=summary_kb, parse_mode="Markdown")
+
+    data_after = load_ledger_entries()
+    for e in data_after.get(str(chat_id), []):
+        if e.get("id") == entry["id"]:
+            e["confirm_message_id"] = sent.message_id
+            break
+    save_ledger_entries(data_after)
+    return True
+    data_now = load_ledger_entries()
+    entry["id"] = len(data_now.get(str(chat_id), [])) + 1
+    entry["voided"] = False
+    append_ledger_entry(chat_id, entry)
+
+    summary_text, summary_kb = build_ledger_summary(chat_id)
+    sent = await update.message.reply_text(summary_text, reply_markup=summary_kb, parse_mode="Markdown")
+
+    data_after = load_ledger_entries()
+    for e in data_after.get(str(chat_id), []):
+        if e.get("id") == entry["id"]:
+            e["confirm_message_id"] = sent.message_id
+            break
+    save_ledger_entries(data_after)
+    return True
+
+async def try_handle_ledger_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """回复某笔记账消息（自己发的原始指令，或Bot的确认回执都可以），发「撤销」/「撤销恢复」来作废/恢复该笔记录。"""
+    is_revoke = RE_REVOKE.match(text)
+    is_restore = RE_REVOKE_RESTORE.match(text)
+    if not (is_revoke or is_restore):
+        return False
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("请回复要撤销的那条记账消息，再发「撤销」")
+        return True
+
+    chat_id = update.effective_chat.id
+    target_message_id = update.message.reply_to_message.message_id
+
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    target = next(
+        (e for e in entries
+         if e.get("confirm_message_id") == target_message_id
+         or e.get("user_message_id") == target_message_id),
+        None,
+    )
+
+    if not target:
+        await update.message.reply_text("没找到这条消息对应的记账记录（可能不是记账相关消息）")
+        return True
+
+    if is_revoke:
+        if target.get("voided"):
+            await update.message.reply_text("这笔已经是撤销状态了")
+            return True
+        target["voided"] = True
+        save_ledger_entries(data)
+        await update.message.reply_text(f"✅ 已撤销这笔记录（#{target['id']}），不再计入统计")
+        summary_text, summary_kb = build_ledger_summary(chat_id)
+        await update.message.reply_text(summary_text, reply_markup=summary_kb, parse_mode="Markdown")
+        return True
+
+    if not target.get("voided"):
+        await update.message.reply_text("这笔本来就没被撤销，不需要恢复")
+        return True
+    target["voided"] = False
+    save_ledger_entries(data)
+    await update.message.reply_text(f"✅ 已恢复这笔记录（#{target['id']}），重新计入统计")
+    summary_text, summary_kb = build_ledger_summary(chat_id)
+    await update.message.reply_text(summary_text, reply_markup=summary_kb, parse_mode="Markdown")
+    return True
+
+RE_SET_IN_FEE = re.compile(r"^设置入账费率\s*(-?\d+(?:\.\d+)?)$")
+RE_SET_OUT_FEE = re.compile(r"^设置出账费率\s*(-?\d+(?:\.\d+)?)$")
+RE_SET_RATE = re.compile(r"^设置([A-Za-z]+)汇率\s*(/?-?\d+(?:\.\d+)?)$")
+RE_SET_CURRENCY = re.compile(r"^设置币种\s*([A-Za-z]+)$")
+RE_SET_TZ = re.compile(r"^设置时区\s*([+-]?\d+(?:\.\d+)?)$")
+RE_SET_DISBURSE_FEE = re.compile(r"^设置手续费\s*(-?\d+(?:\.\d+)?)$")
+RE_VIEW_LEDGER_SETTINGS = re.compile(r"^记账设置$")
+RE_VIEW_LEDGER_BILL = re.compile(r"^账单$")
+RE_CLOSE_LEDGER = re.compile(r"^结束账单$")
+RE_UNDO_CLOSE_LEDGER = re.compile(r"^撤销结束账单$")
+RE_SET_PERIOD_LABEL = re.compile(r"^设定日期\s*(\d{4}-\d{2}-\d{2})$")
+RE_SET_AUTO_CLOSE = re.compile(r"^设置自动结算时间\s*(\d{1,2}):(\d{2})$")
+RE_CANCEL_AUTO_CLOSE = re.compile(r"^取消自动结算$")
+RE_LEDGER_ENTRY = re.compile(r"^([+-])\s*(\d+(?:\.\d+)?)\s*(.*)$", re.DOTALL)
+RE_LEDGER_DISBURSE = re.compile(r"^下发\s*([+-]?\d+(?:\.\d+)?)\s*(?:手续\s*(\d+(?:\.\d+)?)\s*)?(.*)$", re.DOTALL)
+RE_REVOKE = re.compile(r"^撤销$")
+RE_REVOKE_RESTORE = re.compile(r"^撤销恢复$")
+RE_CLEAR_LEDGER = re.compile(r"^清空账单$")
+RE_EXPORT_LEDGER = re.compile(r"^导出账单$")
+RE_UNDO_CLEAR_LEDGER = re.compile(r"^撤销清空账单$")
+
+def clear_ledger_today(chat_id):
+    """把当前账期所有未作废的记录标记作废，结转余额不动。返回被清空的笔数。"""
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+    period_start_str = get_period_start_str(chat_id, tz)
+
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    cleared_ids = []
+    for e in entries:
+        if e.get("time", "") >= period_start_str and not e.get("voided"):
+            e["voided"] = True
+            cleared_ids.append(e["id"])
+    save_ledger_entries(data)
+
+    snapshots = load_clear_snapshots()
+    snapshots[str(chat_id)] = cleared_ids
+    save_clear_snapshots(snapshots)
+
+    return len(cleared_ids)
+
+
+def undo_clear_ledger_today(chat_id):
+    """撤销最近一次「清空账单」，把当时被清空的那批记录恢复。成功返回恢复的笔数，没有可撤销的返回None。"""
+    snapshots = load_clear_snapshots()
+    cleared_ids = snapshots.pop(str(chat_id), None)
+    if cleared_ids is None:
+        return None
+    save_clear_snapshots(snapshots)
+
+    data = load_ledger_entries()
+    entries = data.get(str(chat_id), [])
+    restored = 0
+    for e in entries:
+        if e.get("id") in cleared_ids and e.get("voided"):
+            e["voided"] = False
+            restored += 1
+    save_ledger_entries(data)
+
+    return restored
+
+def close_ledger_day(chat_id):
+    """结算当前账期每个币种的 GrandTotal，结转到下一账期，账期日期+1。"""
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+    in_totals, out_totals = get_today_totals(chat_id, tz)
+    _, disburse_totals = get_today_disburse(chat_id, tz)
+
+    raw_carryover = get_group_carryover(chat_id)
+    if isinstance(raw_carryover, (int, float)):
+        carryover = {settings.get("currency", "USDT"): float(raw_carryover)}
+    elif isinstance(raw_carryover, dict):
+        carryover = dict(raw_carryover)
+    else:
+        carryover = {}
+
+    label = get_period_label(chat_id, tz)
+    snapshots = load_close_snapshots()
+    snapshots[str(chat_id)] = {
+        "period_start": settings.get("period_start"),
+        "period_label": settings.get("period_label"),
+        "carryover": carryover,
+    }
+    save_close_snapshots(snapshots)
+
+    all_currencies = set(in_totals.keys()) | set(out_totals.keys()) | set(carryover.keys()) | {settings.get("currency", "USDT")}
+    grand_totals = {}
+    for cur in all_currencies:
+        c_val = carryover.get(cur, 0.0)
+        i_val = in_totals.get(cur, 0.0)
+        o_val = out_totals.get(cur, 0.0)
+        gt = c_val + i_val - o_val
+        grand_totals[cur] = gt
+
+    set_group_carryover(chat_id, grand_totals)
+
+    try:
+        curr_dt = datetime.strptime(label, "%Y-%m-%d")
+        next_dt = curr_dt + timedelta(days=1)
+        next_label = next_dt.strftime("%Y-%m-%d")
+    except Exception:
+        next_label = label
+
+    settings["period_label"] = next_label
+    all_s = load_ledger_settings()
+    all_s[str(chat_id)] = settings
+    save_ledger_settings(all_s)
+
+    all_entries = load_ledger_entries()
+    all_entries[str(chat_id)] = []
+    save_ledger_entries(all_entries)
+
+    return grand_totals, next_label
+
+def undo_close_ledger_day(chat_id):
+    """撤销最近一次「结束账单」操作。成功返回True，没有可撤销的快照返回False。"""
+    snapshots = load_close_snapshots()
+    snap = snapshots.pop(str(chat_id), None)
+    if snap is None:
+        return False
+
+    save_close_snapshots(snapshots)
+
+    set_group_ledger_setting(chat_id, "period_start", snap["period_start"])
+    set_group_ledger_setting(chat_id, "period_label", snap["period_label"])
+    set_group_carryover(chat_id, snap["carryover"])
+    return True
+
+
+async def clearledger_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user):
+        await query.edit_message_text("只有管理员能清空账单")
+        return
+    chat_id = update.effective_chat.id
+    count = clear_ledger_today(chat_id)
+    await query.edit_message_text(f"✅ 已清空今日账单，共 {count} 笔记录作废（结转余额不受影响）")
+
+
+async def clearledger_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已取消，账单未清空")
+
+async def try_handle_ledger_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """尝试匹配记账设置类指令。匹配到就处理完并返回True；没匹配到返回False，交给后面的逻辑继续处理。"""
+    chat_id = update.effective_chat.id
+
+    if RE_EXPORT_LEDGER.match(text):
+        settings = get_group_ledger_settings(chat_id)
+        tz = get_ledger_tz(settings)
+        data = load_ledger_entries()
+        entries = data.get(str(chat_id), [])
+        cutoff = (datetime.now(tz) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = [e for e in entries if not e.get("voided") and e.get("time", "") >= cutoff]
+        rows.sort(key=lambda e: e.get("time", ""))
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "账目明细"
+        headers = ["时间", "类型", "金额", "费率(%)", "净额", "汇率", "换算后金额", "币种", "备注", "操作人"]
+        ws.append(headers)
+        type_map = {"in": "入账", "out": "出账", "disburse": "下发"}
+        for e in rows:
+            ws.append([
+                e.get("time", ""),
+                type_map.get(e.get("type", ""), e.get("type", "")),
+                e.get("amount", 0),
+                e.get("fee_pct", 0),
+                e.get("net_amount", 0),
+                e.get("rate", 0),
+                e.get("converted_amount", 0),
+                e.get("currency", ""),
+                e.get("note", ""),
+                e.get("operator_name", ""),
+            ])
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
+            for cell in row:
+                cell.font = Font(name="Arial", bold=(cell.row == 1))
+        for col_cells in ws.columns:
+            values = [str(c.value) for c in col_cells if c.value is not None]
+            width = max([len(v) for v in values], default=10)
+            ws.column_dimensions[col_cells[0].column_letter].width = max(10, width + 2)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        filename = f"账单导出_{datetime.now(tz).strftime('%Y%m%d_%H%M')}.xlsx"
+        if rows:
+            await update.message.reply_document(
+                document=buf,
+                filename=filename,
+                caption=f"共导出 {len(rows)} 笔记录（近30天，已排除清空/作废记录）",
+            )
+        else:
+            await update.message.reply_text("近30天没有可导出的有效记录。")
+        return True
+
+    m = RE_SET_IN_FEE.match(text)
+    if RE_CLEAR_LEDGER.match(text):
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能清空账单")
+            return True
+        buttons = [
+            [InlineKeyboardButton("✅ 确认清空", callback_data="clearledger:confirm")],
+            [InlineKeyboardButton("❌ 取消", callback_data="clearledger:cancel")],
+        ]
+        await update.message.reply_text(
+            "⚠️ 确定要清空今日账单吗？\n今天已记的所有入账/出账/下发记录都会作废（结转余额不受影响）。\n"
+            "此操作可以用「撤销清空账单」撤回。",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return True
+
+    if m:
+        set_group_ledger_setting(chat_id, "in_fee", float(m.group(1)))
+        await update.message.reply_text(f"✅ 本群入账费率已设置为 {m.group(1)}%")
+        return True
+
+    m = RE_SET_OUT_FEE.match(text)
+    if m:
+        set_group_ledger_setting(chat_id, "out_fee", float(m.group(1)))
+        await update.message.reply_text(f"✅ 本群出账费率已设置为 {m.group(1)}%")
+        return True
+
+    m = RE_SET_RATE.match(text)
+    if m:
+        currency = m.group(1).upper()
+        raw = m.group(2)
+        if raw.startswith("/"):
+            mode, value = "divide", float(raw[1:])
+        else:
+            mode, value = "multiply", float(raw)
+
+        settings = get_group_ledger_settings(chat_id)
+        rates = settings.get("rates", {})
+        rates[currency] = {"value": value, "mode": mode}
+        set_group_ledger_setting(chat_id, "rates", rates)
+
+        symbol = "÷" if mode == "divide" else "×"
+        await update.message.reply_text(f"✅ {currency} 汇率已设置为 {symbol}{value}")
+        return True
+
+    m = RE_SET_CURRENCY.match(text)
+    if m:
+        currency = m.group(1).upper()
+        set_group_ledger_setting(chat_id, "currency", currency)
+        await update.message.reply_text(f"✅ 本群币种已设置为 {currency}")
+        return True
+
+    m = RE_SET_TZ.match(text)
+    if m:
+        offset = float(m.group(1))
+        set_group_ledger_setting(chat_id, "tz_offset", offset)
+        sign = "+" if offset >= 0 else ""
+        await update.message.reply_text(f"✅ 本群时区已设置为 UTC{sign}{offset}")
+        return True
+
+    m = RE_SET_DISBURSE_FEE.match(text)
+    if m:
+        set_group_ledger_setting(chat_id, "disburse_fee", float(m.group(1)))
+        await update.message.reply_text(f"✅ 本群下发手续费已设置为 {m.group(1)}（固定金额，下发为负数时才扣）")
+        return True
+
+    if RE_VIEW_LEDGER_SETTINGS.match(text):
+        s = get_group_ledger_settings(chat_id)
+        symbol = "÷" if s["rate_mode"] == "divide" else "×"
+        tz_sign = "+" if s["tz_offset"] >= 0 else ""
+        await update.message.reply_text(
+            "📊 本群当前记账设置：\n"
+            f"入账费率：{s['in_fee']}%\n"
+            f"出账费率：{s['out_fee']}%\n"
+            f"汇率：{symbol}{s['rate']}\n"
+            f"币种：{s['currency']}\n"
+            f"时区：UTC{tz_sign}{s['tz_offset']}\n\n"
+            "记一笔：发 +金额 表示入账，-金额 表示出账，后面可加备注\n"
+            "例如：+100 客户老王 / -50 提现\n"
+            "查看账单：发「账单」两个字"
+        )
+        return True
+
+    if RE_VIEW_LEDGER_BILL.match(text):
+        text_out, kb = build_ledger_summary(chat_id)
+        await update.message.reply_text(text_out, reply_markup=kb, parse_mode="Markdown")
+        return True
+
+    if RE_CLOSE_LEDGER.match(text):
+        grand_totals, next_label = close_ledger_day(chat_id)
+        s = get_group_ledger_settings(chat_id)
+        if isinstance(grand_totals, dict):
+            gt_str = " | ".join([f"{cur}: {_fmt_num(val)}" for cur, val in grand_totals.items()])
+        else:
+            gt_str = _fmt_num(grand_totals)
+        await update.message.reply_text(
+            f"✅ 账单已结束！\n\n"
+            f"📊 **结转总额**：`{gt_str}`\n"
+            f"📅 **新账期**：{next_label}",
+            parse_mode="Markdown"
+        )
+        return True
+
+    if RE_UNDO_CLOSE_LEDGER.match(text):
+        ok = undo_close_ledger_day(chat_id)
+        if ok:
+            await update.message.reply_text("✅ 已撤销最近一次「结束账单」，账期恢复到结束前的状态")
+        else:
+            await update.message.reply_text("没有可撤销的「结束账单」记录（可能已经撤销过，或还没结束过账单）")
+        return True
+
+    m = RE_SET_PERIOD_LABEL.match(text)
+    if m:
+        set_group_ledger_setting(chat_id, "period_label", m.group(1))
+        await update.message.reply_text(f"✅ 账期日期已校准为：{m.group(1)}")
+        return True
+
+    m = RE_SET_AUTO_CLOSE.match(text)
+    if m:
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能设置全局自动结算时间")
+            return True
+        hh, mm = int(m.group(1)), int(m.group(2))
+        time_str = f"{hh:02d}:{mm:02d}"
+        save_ledger_global({"auto_close_time": time_str})
+        schedule_ledger_autoclose(context.application, time_str)
+        await update.message.reply_text(f"✅ 已设置每天 {time_str}（UTC+8）自动对所有群结算账单")
+        return True
+
+    if RE_CANCEL_AUTO_CLOSE.match(text):
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能取消全局自动结算")
+            return True
+        save_ledger_global({})
+        for job in context.application.job_queue.get_jobs_by_name("ledger_autoclose"):
+            job.schedule_removal()
+        await update.message.reply_text("✅ 已取消每日自动结算账单")
+        return True
+
+    return False
+
+async def try_handle_ledger_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """尝试匹配「记一笔」：+金额 / -金额，可带备注。匹配到就记账并返回True。"""
+    m = RE_LEDGER_ENTRY.match(text)
+    if not m:
+        return False
+
+    sign, amount_str, note = m.groups()
+    amount = float(amount_str)
+    note = note.strip()
+
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+
+    entry_type = "in" if sign == "+" else "out"
+    fee_pct = settings["in_fee"] if entry_type == "in" else settings["out_fee"]
+    if entry_type == "out":
+        net_amount = amount * (1 + fee_pct / 100)
+    else:
+        net_amount = amount * (1 - fee_pct / 100)
+
+    currency = settings["currency"]
+    rate, rate_mode = get_currency_rate(settings, currency)
+    if rate_mode == "divide":
+        converted_amount = net_amount / rate if rate else net_amount
+    else:
+        converted_amount = net_amount * rate
+
+    now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    operator_name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+
+    entry = {
+        "type": entry_type,
+        "amount": amount,
+        "fee_pct": fee_pct,
+        "net_amount": round(net_amount, 4),
+        "rate": rate,
+        "rate_mode": rate_mode,
+        "converted_amount": round(converted_amount, 4),
+        "currency": settings["currency"],
+        "note": note,
+        "operator_id": user.id,
+        "operator_name": operator_name,
+        "time": now_str,
+    }
+
+    data_now = load_ledger_entries()
+    entry["id"] = len(data_now.get(str(chat_id), [])) + 1
+    entry["voided"] = False
+    entry["user_message_id"] = update.message.message_id
+    append_ledger_entry(chat_id, entry)
+
+    summary_text, summary_kb = build_ledger_summary(chat_id)
+    sent = await update.message.reply_text(summary_text, reply_markup=summary_kb, parse_mode="Markdown")
+
+    data_after = load_ledger_entries()
+    for e in data_after.get(str(chat_id), []):
+        if e.get("id") == entry["id"]:
+            e["confirm_message_id"] = sent.message_id
+            break
+    save_ledger_entries(data_after)
+    return True
+
+LEDGER_PAGE_SIZE = 20
+LEDGER_COMPACT_COUNT = 5
+
+_SUPERSCRIPT_MAP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+def fee_superscript(fee_pct):
+    """把费率百分比转成上标数字，例如 2 -> ²，15 -> ¹⁵。费率为0时返回空字符串。"""
+    if not fee_pct:
+        return ""
+    n = int(fee_pct) if fee_pct == int(fee_pct) else fee_pct
+    return str(abs(n)).translate(_SUPERSCRIPT_MAP)
+
+def _fmt_num(n):
+    """去掉多余的 .0，但保留有意义的小数。"""
+    n = round(n, 4)
+    if n == int(n):
+        return str(int(n))
+    return f"{n:g}"
+
+def format_ledger_line(entry, is_multi=False):
+    time_str = entry["time"][11:16]
+    sign = 1 if entry["type"] == "in" else -1
+    display_amount = _fmt_num(sign * entry["amount"])
+    display_net = _fmt_num(sign * entry["net_amount"])
+    fee_str = fee_superscript(entry.get("fee_pct", 0))
+    cur_suffix = f" {entry.get('currency', 'USDT')}" if is_multi else ""
+
+    if fee_str:
+        line = f"`{time_str}` {display_amount} {fee_str} = {display_net}{cur_suffix}"
+    else:
+        line = f"`{time_str}` {display_amount} = {display_net}{cur_suffix}"
+    if entry.get("note"):
+        line += f"  {entry['note']}"
+    return line
+
+def build_ledger_summary(chat_id):
+    """默认紧凑视图：入账/出账/下发分开计数，各显示最近5笔，底部含GrandTotal。
+    只出现过1种货币时维持单行格式；出现过2种或以上才切换成按币种分类显示。"""
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+    ins, outs = get_today_entries_split(chat_id, tz)
+    in_totals, out_totals = get_today_totals(chat_id, tz)
+    disburse_items, disburse_totals = get_today_disburse(chat_id, tz)
+    raw_carryover = get_group_carryover(chat_id)
+    if isinstance(raw_carryover, (int, float)):
+        carryover = {settings["currency"]: float(raw_carryover)}
+    elif isinstance(raw_carryover, dict):
+        carryover = raw_carryover
+    else:
+        carryover = {}
+
+    all_currencies = sorted(set(carryover) | set(in_totals) | set(out_totals) | set(disburse_totals))
+    is_multi = len(all_currencies) > 1
+
+    grand_totals = {}
+    for cur in (all_currencies or [settings["currency"]]):
+        grand_totals[cur] = round(
+            carryover.get(cur, 0.0) + in_totals.get(cur, 0.0) - out_totals.get(cur, 0.0) + disburse_totals.get(cur, 0.0),
+            4,
+        )
+
+    period_label = get_period_label(chat_id, tz)
+    lines = [f"📅 账期：{period_label}", ""]
+    lines.append(f"已入账 ({len(ins)}笔)")
+    lines += [format_ledger_line(e, is_multi) for e in ins[-LEDGER_COMPACT_COUNT:]] or ["（暂无）"]
+    lines.append("")
+    lines.append(f"已出账 ({len(outs)}笔)")
+    lines += [format_ledger_line(e, is_multi) for e in outs[-LEDGER_COMPACT_COUNT:]] or ["（暂无）"]
+    lines.append("")
+    lines.append(f"已下发 ({len(disburse_items)}笔)")
+    lines += [format_disburse_line(e) for e in disburse_items[-LEDGER_COMPACT_COUNT:]] or ["（暂无）"]
+    lines.append("")
+    lines.append(f"当前费率：入账 {settings['in_fee']}% ・出账 {settings['out_fee']}%")
+    cur_rate, cur_rate_mode = get_currency_rate(settings, settings["currency"])
+    rate_symbol = "÷" if cur_rate_mode == "divide" else "×"
+    lines.append(f"当前汇率（{settings['currency']}）：{rate_symbol}{cur_rate}")
+    if settings.get("disburse_fee"):
+        lines.append(f"下发手续费：{_fmt_num(settings['disburse_fee'])}")
+    lines.append("")
+
+
+    if is_multi:
+            lines.append("今日累计入账：")
+            for cur in all_currencies:
+                if in_totals.get(cur):
+                    lines.append(f"`  {cur:<5}: {_fmt_num(in_totals[cur])}`")
+            lines.append("今日累计出账：")
+            for cur in all_currencies:
+                if out_totals.get(cur):
+                    lines.append(f"`  {cur:<5}: {_fmt_num(out_totals[cur])}`")
+            lines.append("GrandTotal：")
+            for cur in all_currencies:
+                lines.append(f"`  {cur:<5}: {_fmt_num(grand_totals[cur])}`")
+    else:
+        cur = settings["currency"]
+        lines.append(f"今日累计入账：{_fmt_num(in_totals.get(cur, 0.0))} {cur}")
+        lines.append(f"今日累计出账：{_fmt_num(out_totals.get(cur, 0.0))} {cur}")
+        lines.append(f"*GrandTotal：{_fmt_num(grand_totals.get(cur, 0.0))} {cur}*")
+
+    text = "\n".join(lines)
+    buttons = []
+    if len(ins) > LEDGER_COMPACT_COUNT or len(outs) > LEDGER_COMPACT_COUNT or len(disburse_items) > LEDGER_COMPACT_COUNT:
+        buttons.append([InlineKeyboardButton("🔽 展开查看更多", callback_data="ledger:expand:1")])
+    return text, InlineKeyboardMarkup(buttons) if buttons else None
+
+def build_ledger_expand_page(chat_id, page):
+    """展开视图：入账+出账按时间合并，每页最多20笔，可翻页。"""
+    settings = get_group_ledger_settings(chat_id)
+    tz = get_ledger_tz(settings)
+    ins, outs = get_today_entries_split(chat_id, tz)
+    in_totals, out_totals = get_today_totals(chat_id, tz)
+    disburse_items, disburse_totals = get_today_disburse(chat_id, tz)
+    raw_carryover = get_group_carryover(chat_id)
+    if isinstance(raw_carryover, (int, float)):
+        carryover = {settings["currency"]: float(raw_carryover)}
+    elif isinstance(raw_carryover, dict):
+        carryover = raw_carryover
+    else:
+        carryover = {}
+    all_currencies = sorted(set(carryover) | set(in_totals) | set(out_totals) | set(disburse_totals))
+    is_multi = len(all_currencies) > 1
+    combined = sorted(ins + outs, key=lambda e: e["time"])
+
+    total = len(combined)
+    pages = max(1, -(-total // LEDGER_PAGE_SIZE))
+    page = max(1, min(page, pages))
+    start = (page - 1) * LEDGER_PAGE_SIZE
+    page_items = combined[start:start + LEDGER_PAGE_SIZE]
+
+    lines = [f"📒 今日账单明细 — 第 {page}/{pages} 页（共 {total} 笔）", ""]
+    for e in page_items:
+        prefix = "🟢" if e["type"] == "in" else "🔴"
+        lines.append(f"{prefix} {format_ledger_line(e, is_multi)}")
+    text = "\n".join(lines)
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"ledger:expand:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="ledger:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"ledger:expand:{page + 1}"))
+
+    buttons = [nav, [InlineKeyboardButton("🔼 收起", callback_data="ledger:collapse")]]
+    return text, InlineKeyboardMarkup(buttons)
+
+async def ledger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user):
+        return
+    text, kb = build_ledger_summary(update.effective_chat.id)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+
+async def ledger_expand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb = build_ledger_expand_page(update.effective_chat.id, page)
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+
+async def ledger_collapse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text, kb = build_ledger_summary(update.effective_chat.id)
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+
+async def ledger_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+WELCOME_SETTINGS_FILE = "/app/welcome_settings.json"
+DEFAULT_WELCOME_TEXT = "欢迎 {name} 加入 {group}！🎉"
+
+def load_welcome_settings():
+    return load_json(WELCOME_SETTINGS_FILE, {})
+
+def save_welcome_settings(data):
+    save_json(WELCOME_SETTINGS_FILE, data)
+
+RE_SET_WELCOME_TEXT = re.compile(r"^设置欢迎语\s+(.+)$", re.DOTALL)
+RE_ENABLE_WELCOME = re.compile(r"^开启欢迎$")
+RE_DISABLE_WELCOME = re.compile(r"^关闭欢迎$")
+RE_VIEW_WELCOME = re.compile(r"^查看欢迎语$")
+
+async def try_handle_welcome_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """全局欢迎语设置：仅管理员可改，改一次全部群一起生效。"""
+    m = RE_SET_WELCOME_TEXT.match(text)
+    if m:
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能设置欢迎语")
+            return True
+        settings = load_welcome_settings()
+        settings["text"] = m.group(1).strip()
+        save_welcome_settings(settings)
+        await update.message.reply_text(f"✅ 欢迎语已更新（全局生效）：\n\n{settings['text']}")
+        return True
+
+    if RE_ENABLE_WELCOME.match(text):
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能开关欢迎功能")
+            return True
+        settings = load_welcome_settings()
+        settings["enabled"] = True
+        save_welcome_settings(settings)
+        await update.message.reply_text("✅ 新人欢迎功能已开启（全局生效）")
+        return True
+
+    if RE_DISABLE_WELCOME.match(text):
+        if not is_admin(update.effective_user):
+            await update.message.reply_text("只有管理员能开关欢迎功能")
+            return True
+        settings = load_welcome_settings()
+        settings["enabled"] = False
+        save_welcome_settings(settings)
+        await update.message.reply_text("✅ 新人欢迎功能已关闭（全局生效）")
+        return True
+
+    if RE_VIEW_WELCOME.match(text):
+        settings = load_welcome_settings()
+        enabled = settings.get("enabled", True)
+        current_text = settings.get("text") or DEFAULT_WELCOME_TEXT
+        await update.message.reply_text(
+            "👋 当前欢迎设置（全局，适用所有群）：\n"
+            f"状态：{'已开启' if enabled else '已关闭'}\n"
+            f"欢迎语：\n{current_text}\n\n"
+            "可用变量：{name}（新人昵称）、{group}（群名）\n"
+            "改文案：发「设置欢迎语 你的内容」\n"
+            "开关：发「开启欢迎」/「关闭欢迎」"
+        )
+        return True
+
+    return False
+
+
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """检测到有新成员加入群时触发，自动跳过Bot本身。"""
+    settings = load_welcome_settings()
+    if not settings.get("enabled", True):
+        return
+    template = settings.get("text") or DEFAULT_WELCOME_TEXT
+    chat = update.effective_chat
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+        name = member.full_name or (f"@{member.username}" if member.username else str(member.id))
+        text = template.replace("{name}", name).replace("{group}", chat.title or "")
+        await update.message.reply_text(text)
+
+
+CHAR_MAP = {
+    "（": "(", "）": ")", "＋": "+", "－": "-",
+    "×": "*", "✕": "*", "＊": "*", "÷": "/", "／": "/",
+    "。": ".", "．": ".",
+    "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
+    "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
+}
+
+
+def normalize(text):
+    for cn, en in CHAR_MAP.items():
+        text = text.replace(cn, en)
+    return text
+
+
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        ["使用说明", "联系客服"],
+        ["个人中心", "群发广播"],
+        ["续费空间", "全局账单"],
+    ],
+    resize_keyboard=True,
+)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_authorized(user):
+        return
+
+    await update.message.reply_text(
+        "你好！我是你的助手机器人 🤖\n",
+        reply_markup=MAIN_MENU,
+    )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_authorized(user):
+        return
+
+    text = update.message.text.strip()
+    bot_username = context.bot.username
+    if bot_username:
+        text = text.replace(f"@{bot_username}", "").strip()
+
+    text = normalize(text)
+
+    if text == "群发广播":
+        if is_admin(user):
+            await update.message.reply_text("请发送 /broadcast 指令开始群发流程")
+        else:
+            await update.message.reply_text("该功能仅管理员可用")
+        return
+
+    menu_placeholders = {"使用说明", "联系客服", "个人中心", "群发广播", "全局账单", "续费空间"}
+    if text == "使用说明":
+        await update.message.reply_text(
+             "<b>用户权限</b>\n"
+            "/adduser ▶️ 问答添加授权用户\n"
+            "/removeuser ▶️ 列表移除授权用户\n"
+            "/listusers ▶️ 查看/管理授权用户\n"
+            "\n"
+            "<b>群发广播</b>\n"
+            "/addtarget ▶️ 登记群发目标\n"
+            "/removetarget ▶️ 列表移除群发目标\n"
+            "/listtargets ▶️ 查看/管理群发目标\n"
+            "/adddraft ▶️ 添加群发文案\n"
+            "/listdrafts ▶️ 查看/管理群发文案\n"
+            "/broadcast ▶️ 发起定时/即时群发\n"
+            "/whereami ▶️ 查询当前群组 ID\n"
+            "\n"
+            "<b>租户管理</b>\n"
+            "租户列表 ▶️查看群租户到期状态\n"
+            "/duedate ▶️ 批量登记租户项目\n"
+            "/listduedate ▶️ 管理租户项目（退租/改价）\n"
+            "\n"
+            "<b>记账账单</b>\n"
+            "+金额 [备注] ▶️ 记入账\n"
+            "-金额 [备注] ▶️ 记出账\n"
+            "下发 金额 [手续X] [备注] ▶️ 记下发\n"
+            "账单 或 /ledger ▶️ 查看本群账单\n"
+            "结束账单 ▶️ 结算并结转到下一账期\n"
+            "撤销结束账单 ▶️ 撤销上一次结算\n"
+            "设定日期 YYYY-MM-DD ▶️ 校准账期日期\n"
+            "导出账单 ▶️ 导出近 30 天 Excel\n"
+            "清空账单 ▶️ 清空今日记录\n"
+            "撤销清空账单 ▶️ 恢复清空的记录\n"
+            "\n"
+            "<b>记账设置</b>\n"
+            "设置入账费率 X ▶️ 设置入账扣费 %\n"
+            "设置出账费率 X ▶️ 设置出账扣费 %\n"
+            "设置[币种]汇率 X ▶️ 设置币种汇率\n"
+            "设置币种 XXX ▶️ 设置记录币种\n"
+            "设置时区 X ▶️ 设置群时区\n"
+            "设置手续费 X ▶️ 设置下发固定手续费\n"
+            "记账设置 ▶️ 查看当前记账参数\n"
+            "撤销 (回复消息) ▶️ 作废单笔记账\n"
+            "撤销恢复 (回复消息) ▶️ 恢复已作废记账\n"
+            "设置自动结算时间 HH:MM ▶️ 设置每日自动结算\n"
+            "取消自动结算 ▶️ 取消自动结算\n"
+            "\n"
+            "<b>实用工具</b>\n"
+            "算式 (如 3+5*2) ▶️ 简易计算器\n"
+            "\n"
+            "<b>系统控制</b>\n"
+            "/start ▶️ 呼出主菜单键盘\n"
+            "/cancel ▶️ 终止当前问答流程\n"
+            "设置欢迎语 内容 ▶️ 设置新人欢迎文案\n"
+            "开启欢迎 / 关闭欢迎 ▶️ 开关欢迎功能\n"
+            "查看欢迎语 ▶️ 查看当前欢迎配置",
+            parse_mode="HTML",
+        )
+        return
+    if text == "联系客服":
+        await update.message.reply_text("如有问题请联系管理员：@IgAccJohn")
+    return
+
+    if text == "个人中心":
+        rec = get_tenant_record(user.id)
+    lines = [
+        f"🆔 你的ID：{user.id}",
+        f"👤 用户名：@{user.username}" if user.username else "👤 用户名：（未设置）",
+        f"✅ 授权状态：{'已授权' if is_authorized(user) else '未授权'}",
+    ]
+    if rec:
+        days = days_until_expire(rec["expire_date"])
+        lines.append(f"🏷 租户身份：到期日 {rec['expire_date']}（剩余 {days} 天）")
+    await update.message.reply_text("\n".join(lines))
+    return
+
+    if text == "续费空间":
+        rec = get_tenant_record(user.id)
+    if not rec:
+        await update.message.reply_text("你目前不是租户身份，无需续费。")
+        return
+    days = days_until_expire(rec["expire_date"])
+    buttons = [[InlineKeyboardButton("📮 申请续费", callback_data="tenant:renew_request")]]
+    await update.message.reply_text(
+        f"📅 到期日：{rec['expire_date']}\n⏳ 剩余：{days} 天",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return
+
+    if text == "全局账单":
+        if not is_owner(user):
+            await update.message.reply_text("该功能仅机器人所有者可用")
+        return
+    await update.message.reply_text(build_global_ledger_summary())
+    return
+
+    if await try_handle_ledger_settings(update, context, text):
+        return
+
+    if await try_handle_ledger_revoke(update, context, text):
+        return
+
+    if await try_handle_ledger_entry(update, context, text):
+        return
+    if await try_handle_ledger_disburse(update, context, text):
+        return
+    if await try_handle_welcome_settings(update, context, text):
+        return
+
+    allowed_chars = set("0123456789+-*/(). ")
+    has_operator = any(ch in "+-*/" for ch in text)
+    if text and has_operator and all(c in allowed_chars for c in text):
+        try:
+            result = eval(text)
+            if isinstance(result, float):
+                result = round(result, 2)
+                await update.message.reply_text(f"{result:.2f}")
+            else:
+                await update.message.reply_text(f"{result}")
+        except ZeroDivisionError:
+            await update.message.reply_text("不能除以0哦～")
+        except Exception:
+            pass
+
+
+async def post_init(application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "开始聊天"),
+        BotCommand("broadcast", "发起群发任务"),
+        BotCommand("adduser", "用户使用授权"),
+        BotCommand("removeuser", "移除使用权限（点选列表）"),
+        BotCommand("listusers", "查看/管理已授权用户"),
+        BotCommand("addtarget", "登记群发目标群组"),
+        BotCommand("removetarget", "移除群发目标群组（点选列表）"),
+        BotCommand("listtargets", "查看/管理群发目标群组"),
+        BotCommand("whereami", "查当前聊天室ID"),
+        BotCommand("adddraft", "添加群发文案"),
+        BotCommand("listdrafts", "查看/管理群发文案"),
+        BotCommand("duedate", "登记租户到期项目"),
+        BotCommand("listduedate", "查看/管理租户到期项目"),
+    ])
+
+    g = load_ledger_global()
+    if g.get("auto_close_time"):
+        schedule_ledger_autoclose(application, g["auto_close_time"])
+
+    for job in application.job_queue.get_jobs_by_name("duedate_scan_1200"):
+        job.schedule_removal()
+    application.job_queue.run_daily(
+        duedate_scan_1200, time=dt_time(hour=12, minute=0, tzinfo=MY_TZ), name="duedate_scan_1200"
+    )
+    for job in application.job_queue.get_jobs_by_name("duedate_scan_1500"):
+        job.schedule_removal()
+    application.job_queue.run_daily(
+        duedate_scan_1500, time=dt_time(hour=15, minute=0, tzinfo=MY_TZ), name="duedate_scan_1500"
+    )
+
+    application.job_queue.run_once(duedate_scan_1200, when=5)
+    application.job_queue.run_once(duedate_scan_1500, when=8)
+
+app = ApplicationBuilder().token(TOKEN).post_init(post_init).concurrent_updates(True).build()
+
+app.add_handler(CommandHandler("start", start))
+
+app.add_handler(adduser_conv)
+app.add_handler(addtarget_conv)
+app.add_handler(adddraft_conv)
+app.add_handler(broadcast_conv)
+
+app.add_handler(CommandHandler("listusers", listusers_cmd))
+app.add_handler(CommandHandler("removeuser", removeuser_alias))
+app.add_handler(CallbackQueryHandler(listusers_page_cb, pattern=r"^lu:page:\d+$"))
+app.add_handler(CallbackQueryHandler(listusers_rmconfirm_cb, pattern=r"^lu:rmconfirm:"))
+app.add_handler(CallbackQueryHandler(listusers_rm_cb, pattern=r"^lu:rm:(id|un):"))
+app.add_handler(CallbackQueryHandler(listusers_cancel_cb, pattern=r"^lu:cancel:\d+$"))
+app.add_handler(CallbackQueryHandler(listusers_close_cb, pattern=r"^lu:close$"))
+app.add_handler(CallbackQueryHandler(listusers_noop_cb, pattern=r"^lu:noop$"))
+
+app.add_handler(CommandHandler("listtargets", listtargets_cmd))
+app.add_handler(CommandHandler("removetarget", removetarget_alias))
+app.add_handler(CallbackQueryHandler(listtargets_page_cb, pattern=r"^lt:page:\d+$"))
+app.add_handler(CallbackQueryHandler(listtargets_refresh_cb, pattern=r"^lt:refresh:\d+$"))
+app.add_handler(CallbackQueryHandler(listtargets_rmconfirm_cb, pattern=r"^lt:rmconfirm:"))
+app.add_handler(CallbackQueryHandler(listtargets_rm_cb, pattern=r"^lt:rm:"))
+app.add_handler(CallbackQueryHandler(listtargets_cancel_cb, pattern=r"^lt:cancel:\d+$"))
+app.add_handler(CallbackQueryHandler(listtargets_close_cb, pattern=r"^lt:close$"))
+app.add_handler(CallbackQueryHandler(listtargets_noop_cb, pattern=r"^lt:noop$"))
+app.add_handler(CallbackQueryHandler(category_list_cb, pattern=r"^lt:catlist$"))
+app.add_handler(CallbackQueryHandler(category_open_cb, pattern=r"^lt:cat:"))
+app.add_handler(CallbackQueryHandler(category_page_cb, pattern=r"^lt:catpage:\d+$"))
+app.add_handler(CallbackQueryHandler(category_toggle_cb, pattern=r"^lt:tg:"))
+app.add_handler(CallbackQueryHandler(category_save_cb, pattern=r"^lt:catsave$"))
+app.add_handler(CallbackQueryHandler(category_back_cb, pattern=r"^lt:catback$"))
+duedate_conv = ConversationHandler(
+    entry_points=[CommandHandler("duedate", duedate_start)],
+    states={
+        DD_GROUP: [CallbackQueryHandler(duedate_pick_group_cb, pattern="^dd:pick:")],
+        DD_ITEMS: [
+            CallbackQueryHandler(duedate_items_done_cb, pattern="^dd:itemsdone$"),
+            CallbackQueryHandler(duedate_cycle_choice_cb, pattern="^dd:cycle:"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, duedate_receive_items),
+        ],
+        DD_CYCLE_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, duedate_cycle_days_receive)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+def build_duedate_group_list():
+    data = load_tenants()
+    known = load_known_groups()
+    chat_ids = [cid for cid, bucket in data.items() if bucket]
+    text_lines = ["📂 租户到期管理", ""]
+    if chat_ids:
+        text_lines.append(f"共 {len(chat_ids)} 个群有登记项目，点击进入：")
+    else:
+        text_lines.append("（暂无任何登记项目，请先用 /duedate 登记）")
+    buttons = []
+    for cid in chat_ids:
+        title = known.get(cid, {}).get("title") or cid
+        count = len(data[cid])
+        buttons.append([InlineKeyboardButton(f"{title}（{count}项）", callback_data=f"ddm:grp:{cid}")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="ddm:close")])
+    return "\n".join(text_lines), InlineKeyboardMarkup(buttons)
+
+
+def _duedate_item_line(num, item):
+    name = item.get("name", "未命名")
+    due = item.get("due_date") or "无（一次性）"
+    status = compute_status_text(item.get("current_period", 1), item.get("min_periods", 1))
+    amount = item.get("amount", 0)
+    return f"{num} {name} ｜到期{due}｜¥{amount}｜{status}"
+
+
+def _duedate_matrix(chat_id, page, pending):
+    data = load_tenants()
+    bucket = data.get(str(chat_id), {})
+    items = sorted(bucket.items(), key=lambda kv: (kv[1].get("due_date") or "9999-99-99", kv[1].get("name", "")))
+    total = len(items)
+    pages = total_pages(total) if total else 1
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    lines = [f"租户项目管理 已选 {len(pending)}", ""]
+    rows = []
+    btn_row = []
+    for i, (item_id, item) in enumerate(page_items):
+        num = start + i + 1
+        checked = "☑" if item_id in pending else "☐"
+        lines.append(f"{checked} {_duedate_item_line(num, item)}")
+        btn_row.append(InlineKeyboardButton(str(num), callback_data=f"ddm:tg:{item_id}"))
+        if len(btn_row) == 5:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+
+    if not page_items:
+        lines.append("（这个群暂无登记项目）")
+
+    lines.append("")
+    lines.append(f"▶第({page})页 共计{total}条")
+    text = "\n".join(lines)
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"ddm:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"第{page}/{pages}页", callback_data="ddm:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"ddm:page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    if pending:
+        rows.append([InlineKeyboardButton(f"🗑 退租选中（{len(pending)}项）", callback_data="ddm:confirmdel")])
+    if len(pending) == 1:
+        rows.append([InlineKeyboardButton("✏️ 编辑选中项目", callback_data="ddm:edit")])
+    rows.append([InlineKeyboardButton("🔙 返回群列表", callback_data="ddm:grplist")])
+    rows.append([InlineKeyboardButton("❌ 关闭", callback_data="ddm:close")])
+    return text, InlineKeyboardMarkup(rows), page
+
+
+async def listduedate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb = build_duedate_group_list()
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def ddm_group_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("ddm_chat_id", None)
+    context.user_data.pop("ddm_pending", None)
+    context.user_data.pop("ddm_page", None)
+    text, kb = build_duedate_group_list()
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def ddm_open_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.data.split(":", 2)[2]
+    context.user_data["ddm_chat_id"] = chat_id
+    context.user_data["ddm_pending"] = set()
+    context.user_data["ddm_page"] = 1
+    text, kb, _ = _duedate_matrix(chat_id, 1, set())
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def ddm_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = context.user_data.get("ddm_chat_id")
+    if not chat_id:
+        await query.edit_message_text("会话已过期，请重新 /listduedate")
+        return
+    page = int(query.data.split(":", 2)[2])
+    pending = context.user_data.get("ddm_pending", set())
+    context.user_data["ddm_page"] = page
+    text, kb, _ = _duedate_matrix(chat_id, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def ddm_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = context.user_data.get("ddm_chat_id")
+    if not chat_id:
+        await query.edit_message_text("会话已过期，请重新 /listduedate")
+        return
+    item_id = query.data.split(":", 2)[2]
+    pending = context.user_data.setdefault("ddm_pending", set())
+    if item_id in pending:
+        pending.discard(item_id)
+    else:
+        pending.add(item_id)
+    page = context.user_data.get("ddm_page", 1)
+    text, kb, _ = _duedate_matrix(chat_id, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def ddm_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def ddm_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = context.user_data.get("ddm_chat_id")
+    pending = context.user_data.get("ddm_pending", set())
+    if not chat_id or not pending:
+        await query.edit_message_text("会话已过期或未选中任何项目，请重新 /listduedate")
+        return
+    data = load_tenants()
+    bucket = data.get(str(chat_id), {})
+    names = [bucket[i]["name"] for i in pending if i in bucket]
+    text = "⚠️ 确定要退租以下项目吗？此操作不可恢复：\n\n" + "\n".join(f"• {n}" for n in names)
+    buttons = [
+        [InlineKeyboardButton("✅ 确认退租", callback_data="ddm:delyes")],
+        [InlineKeyboardButton("❌ 取消", callback_data="ddm:delno")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def ddm_delete_yes_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("已退租")
+    chat_id = context.user_data.get("ddm_chat_id")
+    pending = context.user_data.pop("ddm_pending", set())
+    context.user_data["ddm_pending"] = set()
+    if not chat_id:
+        text, kb = build_duedate_group_list()
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+    data = load_tenants()
+    bucket = data.get(str(chat_id), {})
+    for item_id in pending:
+        bucket.pop(item_id, None)
+    if not bucket:
+        data.pop(str(chat_id), None)
+    else:
+        data[str(chat_id)] = bucket
+    save_tenants(data)
+    text, kb, _ = _duedate_matrix(chat_id, 1, set())
+    context.user_data["ddm_page"] = 1
+    await query.edit_message_text(f"✅ 已退租 {len(pending)} 个项目\n\n{text}", reply_markup=kb)
+
+
+async def ddm_delete_no_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("已取消")
+    chat_id = context.user_data.get("ddm_chat_id")
+    pending = context.user_data.get("ddm_pending", set())
+    page = context.user_data.get("ddm_page", 1)
+    if not chat_id:
+        text, kb = build_duedate_group_list()
+        await query.edit_message_text(text, reply_markup=kb)
+        return
+    text, kb, _ = _duedate_matrix(chat_id, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def ddm_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已关闭")
+
+
+app.add_handler(newcat_conv)
+app.add_handler(duedate_conv)
+app.add_handler(CommandHandler("listduedate", listduedate_cmd))
+app.add_handler(CallbackQueryHandler(ddm_group_list_cb, pattern=r"^ddm:grplist$"))
+app.add_handler(CallbackQueryHandler(ddm_open_group_cb, pattern=r"^ddm:grp:"))
+app.add_handler(CallbackQueryHandler(ddm_page_cb, pattern=r"^ddm:page:\d+$"))
+app.add_handler(CallbackQueryHandler(ddm_toggle_cb, pattern=r"^ddm:tg:"))
+app.add_handler(CallbackQueryHandler(ddm_noop_cb, pattern=r"^ddm:noop$"))
+app.add_handler(CallbackQueryHandler(ddm_confirm_cb, pattern=r"^ddm:confirmdel$"))
+app.add_handler(CallbackQueryHandler(ddm_delete_yes_cb, pattern=r"^ddm:delyes$"))
+app.add_handler(CallbackQueryHandler(ddm_delete_no_cb, pattern=r"^ddm:delno$"))
+DDM_EDIT_VALUE = 500
+
+EDIT_FIELD_LABELS = {"amount": "金额", "periods": "合约期数"}
+
+
+async def ddm_edit_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    pending = context.user_data.get("ddm_pending", set())
+    if len(pending) != 1:
+        await query.answer("请先勾选恰好1个项目", show_alert=True)
+        return
+    await query.answer()
+    item_id = next(iter(pending))
+    context.user_data["ddm_edit_item"] = item_id
+    buttons = [
+        [InlineKeyboardButton(f"💰 改{EDIT_FIELD_LABELS['amount']}", callback_data="ddm:editfield:amount")],
+        [InlineKeyboardButton(f"📄 改{EDIT_FIELD_LABELS['periods']}", callback_data="ddm:editfield:periods")],
+        [InlineKeyboardButton("❌ 取消", callback_data="ddm:editcancel")],
+    ]
+    await query.edit_message_text("请选择要修改的字段：", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def ddm_edit_field_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    field = query.data.split(":", 2)[2]
+    context.user_data["ddm_edit_field"] = field
+    label = EDIT_FIELD_LABELS.get(field, field)
+    await query.edit_message_text(f"请输入新的{label}：\n发 /cancel 取消")
+    return DDM_EDIT_VALUE
+
+
+async def ddm_edit_value_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    field = context.user_data.get("ddm_edit_field")
+    item_id = context.user_data.get("ddm_edit_item")
+    chat_id = context.user_data.get("ddm_chat_id")
+    text = update.message.text.strip()
+
+    if field == "amount":
+        try:
+            new_val = float(text)
+        except ValueError:
+            await update.message.reply_text("金额必须是数字，请重新输入：")
+            return DDM_EDIT_VALUE
+    else:
+        try:
+            new_val = int(text)
+            if new_val < 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("合约期数必须是正整数，请重新输入：")
+            return DDM_EDIT_VALUE
+
+    data = load_tenants()
+    bucket = data.get(str(chat_id), {})
+    item = bucket.get(item_id)
+    if not item:
+        await update.message.reply_text("找不到该项目，可能已被删除。")
+        return ConversationHandler.END
+
+    if field == "amount":
+        item["amount"] = new_val
+    else:
+        item["min_periods"] = new_val
+        item["status"] = "已满最低期续租中" if item.get("current_period", 1) >= new_val else "合约进行中"
+    save_tenants(data)
+
+    context.user_data.pop("ddm_edit_field", None)
+    context.user_data.pop("ddm_edit_item", None)
+    pending = set()
+    context.user_data["ddm_pending"] = pending
+    page = context.user_data.get("ddm_page", 1)
+    text_out, kb, _ = _duedate_matrix(chat_id, page, pending)
+    await update.message.reply_text(f"✅ 已更新\n\n{text_out}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def ddm_edit_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("已取消")
+    chat_id = context.user_data.get("ddm_chat_id")
+    pending = context.user_data.get("ddm_pending", set())
+    page = context.user_data.get("ddm_page", 1)
+    text, kb, _ = _duedate_matrix(chat_id, page, pending)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+ddm_edit_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(ddm_edit_field_cb, pattern="^ddm:editfield:")],
+    states={
+        DDM_EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ddm_edit_value_receive)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+app.add_handler(CallbackQueryHandler(ddm_close_cb, pattern=r"^ddm:close$"))
+app.add_handler(CallbackQueryHandler(ddm_edit_start_cb, pattern=r"^ddm:edit$"))
+app.add_handler(CallbackQueryHandler(ddm_edit_cancel_cb, pattern=r"^ddm:editcancel$"))
+app.add_handler(ddm_edit_conv)
+
+MY_TZ = timezone(timedelta(hours=8))
+
+
+def _fmt_item_summary(item):
+    name = item.get("name", "未命名")
+    due = item.get("due_date") or ""
+    amount = item.get("amount", 0)
+    status = compute_status_text(item.get("current_period", 1), item.get("min_periods", 1))
+    return f"项目：{name}\n到期日期：{due}  金额：{amount}\n合约：{status}"
+
+
+def _duedate_buttons(chat_id, item_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ 续租", callback_data=f"dda:renew:{chat_id}:{item_id}"),
+        InlineKeyboardButton("🚪 退租", callback_data=f"dda:cancel:{chat_id}:{item_id}"),
+    ]])
+
+
+async def _send_due_reminder(bot, chat_id, item_id, item):
+    text = f"⏰ 明日到期提醒\n\n{_fmt_item_summary(item)}"
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, reply_markup=_duedate_buttons(chat_id, item_id))
+    except Exception:
+        pass
+
+
+async def _send_escalation(bot, chat_id, item_id, item):
+    creator = item.get("creator")
+    mention = f"@{creator} " if creator else ""
+    text = f"⚠️ {mention}提醒：以下项目明日到期，请尽快处理\n\n{_fmt_item_summary(item)}"
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, reply_markup=_duedate_buttons(chat_id, item_id))
+    except Exception:
+        pass
+
+
+def _advance_item(item):
+    min_periods = item.get("min_periods", 1)
+    current = item.get("current_period", 1)
+    if current < min_periods:
+        current += 1
+    item["current_period"] = current
+    item["status"] = "已满最低期续租中" if current >= min_periods else "合约进行中"
+    old_due = item.get("due_date")
+    base = datetime.strptime(old_due, "%Y-%m-%d").date() if old_due else datetime.now(MY_TZ).date()
+    new_due = compute_next_due(base, item.get("cycle_type"), item.get("cycle_days"))
+    item["due_date"] = new_due.isoformat() if new_due else None
+    item["reminder_stage"] = None
+    return item["status"]
+
+
+async def duedate_scan_1200(context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now(MY_TZ).date()
+    data = load_tenants()
+    changed = False
+    for chat_id, bucket in list(data.items()):
+        for item_id, item in list(bucket.items()):
+            due = item.get("due_date")
+            if not due:
+                continue
+            due_date = datetime.strptime(due, "%Y-%m-%d").date()
+            delta = (due_date - today).days
+            if delta == 1 and not item.get("reminder_stage"):
+                await _send_due_reminder(context.bot, chat_id, item_id, item)
+                item["reminder_stage"] = "sent"
+                changed = True
+            elif delta == -1 and item.get("reminder_stage") in ("sent", "escalated"):
+                status = _advance_item(item)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=f"🔄 项目「{item.get('name')}」无人处理，系统已默认续租\n新到期日：{item.get('due_date')}  状态：{status}",
+                    )
+                except Exception:
+                    pass
+                changed = True
+    if changed:
+        save_tenants(data)
+
+
+async def duedate_scan_1500(context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now(MY_TZ).date()
+    data = load_tenants()
+    changed = False
+    for chat_id, bucket in list(data.items()):
+        for item_id, item in list(bucket.items()):
+            due = item.get("due_date")
+            if not due:
+                continue
+            due_date = datetime.strptime(due, "%Y-%m-%d").date()
+            delta = (due_date - today).days
+            if delta == 1 and item.get("reminder_stage") == "sent":
+                await _send_escalation(context.bot, chat_id, item_id, item)
+                item["reminder_stage"] = "escalated"
+                changed = True
+    if changed:
+        save_tenants(data)
+
+
+async def dda_renew_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_authorized(update.effective_user):
+        await query.answer("你不在授权名单内，无法操作", show_alert=True)
+        return
+    await query.answer()
+    _, _, chat_id, item_id = query.data.split(":", 3)
+    data = load_tenants()
+    bucket = data.get(chat_id, {})
+    item = bucket.get(item_id)
+    if not item:
+        await query.edit_message_text("该项目已不存在（可能已被处理过）")
+        return
+    status = _advance_item(item)
+    save_tenants(data)
+    clicker = update.effective_user.username or update.effective_user.first_name
+    text = f"项目「{item.get('name')}」已续租✅\n操作员 @{clicker}\n\n{_fmt_item_summary(item)}"
+    await query.edit_message_text(text)
+
+
+async def dda_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_authorized(update.effective_user):
+        await query.answer("你不在授权名单内，无法操作", show_alert=True)
+        return
+    await query.answer()
+    _, _, chat_id, item_id = query.data.split(":", 3)
+    data = load_tenants()
+    bucket = data.get(chat_id, {})
+    item = bucket.pop(item_id, None)
+    if not bucket:
+        data.pop(chat_id, None)
+    save_tenants(data)
+    clicker = update.effective_user.username or update.effective_user.first_name
+    if item:
+        text = f"项目「{item.get('name')}」已退租🚪\n操作员 @{clicker}"
+    else:
+        text = "该项目已不存在（可能已被处理过）"
+    await query.edit_message_text(text)
+
+
+async def ddtest1200_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    await duedate_scan_1200(context)
+    await update.message.reply_text("✅ 已手动触发12:00扫描")
+
+
+async def ddtest1500_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    await duedate_scan_1500(context)
+    await update.message.reply_text("✅ 已手动触发15:00扫描")
+
+
+app.add_handler(CallbackQueryHandler(dda_renew_cb, pattern=r"^dda:renew:"))
+app.add_handler(CallbackQueryHandler(dda_cancel_cb, pattern=r"^dda:cancel:"))
+app.add_handler(CommandHandler("ddtest1200", ddtest1200_cmd))
+app.add_handler(CommandHandler("ddtest1500", ddtest1500_cmd))
+
+
+def _fmt_tenant_list_entry(item):
+    name = item.get("name", "未命名")
+    due = item.get("due_date") or "无（一次性）"
+    amount = item.get("amount", 0)
+    status = compute_status_text(item.get("current_period", 1), item.get("min_periods", 1))
+    return f"项目：{name}\n到期日期：{due}  金额：{amount}  合约：{status}"
+
+
+async def tenant_list_keyword_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    if not is_authorized(update.effective_user):
+        return
+    data = load_tenants()
+    bucket = data.get(str(chat.id), {})
+    if not bucket:
+        await update.message.reply_text("该群暂无登记的租户项目")
+        return
+    items = sorted(bucket.values(), key=lambda it: it.get("due_date") or "9999-99-99")
+    blocks = [_fmt_tenant_list_entry(it) for it in items]
+    text = f"📋 {chat.title or ''} 租户列表（共{len(items)}项）\n\n" + "\n\n".join(blocks)
+    await update.message.reply_text(text)
+
+
+app.add_handler(MessageHandler(
+    filters.TEXT & filters.Regex(r"^\s*租户列表\s*$") & ~filters.COMMAND,
+    tenant_list_keyword_handler,
+))
+
+app.add_handler(CommandHandler("listdrafts", listdrafts_cmd))
+app.add_handler(CallbackQueryHandler(listdrafts_page_cb, pattern=r"^ld:page:\d+$"))
+app.add_handler(CallbackQueryHandler(listdrafts_rmconfirm_cb, pattern=r"^ld:rmconfirm:"))
+app.add_handler(CallbackQueryHandler(listdrafts_rm_cb, pattern=r"^ld:rm:\d+$"))
+app.add_handler(CallbackQueryHandler(listdrafts_cancel_cb, pattern=r"^ld:cancel:\d+$"))
+app.add_handler(CallbackQueryHandler(listdrafts_close_cb, pattern=r"^ld:close$"))
+app.add_handler(CallbackQueryHandler(listdrafts_noop_cb, pattern=r"^ld:noop$"))
+
+app.add_handler(CommandHandler("ledger", ledger_cmd))
+app.add_handler(CallbackQueryHandler(ledger_expand_cb, pattern=r"^ledger:expand:\d+$"))
+app.add_handler(CallbackQueryHandler(ledger_collapse_cb, pattern=r"^ledger:collapse$"))
+app.add_handler(CallbackQueryHandler(ledger_noop_cb, pattern=r"^ledger:noop$"))
+app.add_handler(CommandHandler("whereami", whereami))
+app.add_handler(CallbackQueryHandler(clearledger_confirm_cb, pattern=r"^clearledger:confirm$"))
+app.add_handler(CallbackQueryHandler(clearledger_cancel_cb, pattern=r"^clearledger:cancel$"))
+app.add_handler(MessageHandler(filters.ALL, track_known_group), group=1)
+app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+print("机器人已启动，正在监听消息...")
+app.run_polling(drop_pending_updates=True)

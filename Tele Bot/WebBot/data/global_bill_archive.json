@@ -1,0 +1,27 @@
+{
+  "-486100200300": {
+    "2026-09-13": {
+      "settlement": 1200.0,
+      "total_in_amount": 1800.0,
+      "total_out_amount": 600.0,
+      "total_count": 9,
+      "currency": "AUD"
+    },
+    "2026-09-14": {
+      "settlement": 600.0,
+      "total_in_amount": 1000.0,
+      "total_out_amount": 400.0,
+      "total_count": 2,
+      "currency": "AUD"
+    }
+  },
+  "-486100400500": {
+    "2026-09-14": {
+      "settlement": 80.0,
+      "total_in_amount": 120.0,
+      "total_out_amount": 40.0,
+      "total_count": 3,
+      "currency": "AUD"
+    }
+  }
+}
