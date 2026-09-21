@@ -2495,7 +2495,7 @@ def _clear_bc_state(context):
 
 
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """【步骤 1】：先选择立即发送，或配置定时 Schedule"""
+    """【步骤 1】：先选择立即发送，或配置定时任务"""
     if not is_admin(update.effective_user):
         await update.message.reply_text("只有管理员能执行此操作")
         return ConversationHandler.END
@@ -2506,10 +2506,10 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [
         [InlineKeyboardButton("🚀 立即发送", callback_data="bc_time:now")],
-        [InlineKeyboardButton("⏰ 管理/新建定时任务 (Schedule)", callback_data="bc_time:sched")],
+        [InlineKeyboardButton("⏰ 管理/新建定时任务", callback_data="bc_time:sched")],
         [InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")],
     ]
-    await _reply(update, "📌【步骤 1/4】请选择广播发送的时间方式：", reply_markup=InlineKeyboardMarkup(buttons))
+    await _reply(update, "📌【第 1 步 / 共 4 步】请选择发送时间方式：", reply_markup=InlineKeyboardMarkup(buttons))
     return BC_TIMING_MENU
 
 
@@ -2534,12 +2534,12 @@ async def bc_timing_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _show_schedule_list(send_func):
-    """显示已有 Schedule（选用、删除、新增）"""
+    """显示已保存的定时任务（选用、删除、新增）"""
     schedules = load_schedules()
     now = datetime.now(BC_TZ)
     buttons = []
 
-    lines = ["⏰ 已保存的定时时间（选用后再选分组和文案，时间均为 UTC+8）：", ""]
+    lines = ["⏰ 已保存的定时任务（选用后再选分组和文案，时间均为 UTC+8）：", ""]
     if not schedules:
         lines.append("（暂无已保存的定时时间）")
     for sid, sinfo in schedules.items():
@@ -2556,14 +2556,14 @@ async def _show_schedule_list(send_func):
         lines.append(f"🔹 [{stype}] {time_str}{'（已过期）' if expired else ''}")
         row = []
         if not expired:
-            row.append(InlineKeyboardButton(f"✏️ 选用 {time_str}", callback_data=f"sched_select:{sid}"))
+            row.append(InlineKeyboardButton(f"✏️ 使用 {time_str} 这条时间", callback_data=f"sched_select:{sid}"))
         row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"sched_del:{sid}"))
         buttons.append(row)
 
     bc_jobs = load_bc_jobs()
     if bc_jobs:
         lines.append("")
-        lines.append("🚀 已启用的定时群发任务（Bot 重启后自动恢复）：")
+        lines.append("🚀 已启用的定时群发任务（机器人重启后会自动恢复）：")
         for jid, jinfo in bc_jobs.items():
             stype = "每日" if jinfo.get("type") == "daily" else "单次"
             preview = (jinfo.get("content") or "").replace("\n", " ")
@@ -2613,9 +2613,9 @@ async def bc_sched_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     stype = data.split(":", 1)[1]
     context.user_data["temp_sched_type"] = stype
     if stype == "daily":
-        await _safe_edit(query, "请输入每日固定的时间（UTC+8），格式：HH:MM（例如：09:30）")
+        await _safe_edit(query, "请输入每日固定发送的时间（UTC+8），格式：HH:MM（例如：09:30）")
     else:
-        await _safe_edit(query, "请输入具体发送日期时间（UTC+8），格式：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）")
+        await _safe_edit(query, "请输入具体发送的日期时间（UTC+8），格式：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）")
     return BC_INPUT_TIME
 
 
@@ -2657,7 +2657,7 @@ async def bc_input_time_receive(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _ask_group_step(send_func, context):
-    """【步骤 2】：选择目标分组"""
+    """【第 2 步】：选择目标分组"""
     targets = load_targets()
     groups = sorted({g for info in targets.values() for g in info.get("groups", [])})
     context.user_data["bc_group_list"] = groups  # 按钮里只放序号，避免分组名太长超过 callback_data 的 64 字节限制
@@ -2665,7 +2665,7 @@ async def _ask_group_step(send_func, context):
     buttons.append([InlineKeyboardButton("📢 全部分组", callback_data="bc_grp:__ALL__")])
     buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
 
-    await send_func("👥【步骤 2/4】请选择要发送的目标群体分组：", reply_markup=InlineKeyboardMarkup(buttons))
+    await send_func("👥【第 2 步 / 共 4 步】请选择要发送的目标分组：", reply_markup=InlineKeyboardMarkup(buttons))
     return BC_CHOOSE_GROUP
 
 
@@ -2685,7 +2685,7 @@ async def bc_choose_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return ConversationHandler.END
     context.user_data["bc_group"] = group
 
-    # 【步骤 3】：选择新文案 / 已有文案模板
+    # 【第 3 步】：选择新文案 / 已有文案模板
     buttons = [[InlineKeyboardButton("✍️ 临时编写新文案", callback_data="bc_src:new")]]
     if load_drafts():
         buttons.append([InlineKeyboardButton("📄 选择已有文案模板", callback_data="bc_src:draft")])
@@ -2694,7 +2694,7 @@ async def bc_choose_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     label = "全部分组" if group == "__ALL__" else group
     await _safe_edit(
         query,
-        f"目标分组：{label}\n\n📝【步骤 3/4】请选择文案来源：",
+        f"目标分组：{label}\n\n📝【第 3 步 / 共 4 步】请选择文案来源：",
         InlineKeyboardMarkup(buttons),
     )
     return BC_CHOOSE_SOURCE
@@ -2708,12 +2708,12 @@ async def bc_choose_source_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _safe_edit(query, "请输入要群发的文案内容：")
         return BC_TYPING_CONTENT
 
-    # 【步骤 4】：从文案库选择
+    # 【第 4 步】：从文案库选择
     names = sorted(load_drafts())
     context.user_data["bc_draft_list"] = names
     buttons = [[InlineKeyboardButton(f"🏷️ {name}", callback_data=f"bc_draft:{i}")] for i, name in enumerate(names)]
     buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
-    await _safe_edit(query, "🏷️【步骤 4/4】请选择对应的文案标签：", InlineKeyboardMarkup(buttons))
+    await _safe_edit(query, "🏷️【第 4 步 / 共 4 步】请选择要发送的文案：", InlineKeyboardMarkup(buttons))
     return BC_CHOOSE_DRAFT
 
 
@@ -2758,9 +2758,9 @@ async def _show_confirm(send_func, context):
     summary = (
         "📋 请核对最终群发配置：\n\n"
         f"1️⃣ 发送时间：{when_label}\n"
-        f"2️⃣ 目标群体分组：{group_label}\n"
-        f"3️⃣ 文案标签：{tag}\n"
-        f"4️⃣ 预览内容：\n{preview}"
+        f"2️⃣ 目标分组：{group_label}\n"
+        f"3️⃣ 文案名称：{tag}\n"
+        f"4️⃣ 内容预览：\n{preview}"
     )
     buttons = [
         [InlineKeyboardButton("✅ 确认并启动", callback_data="bc_confirm:yes")],
@@ -3305,7 +3305,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "TRON钱包信息：发TRC20地址（T开头）还会自动查该地址的创建日期、可用带宽/能量、"
         "多签安全状态、USDT/TRX余额\n\n"      
         "（管理员专属：/addoperator /removeoperator /listoperators）\n"
-        "（群发广播·管理员专属：/addtarget /removetarget /listtargets /adddraft /listdrafts /broadcast /whereami）"
+        "（群发广播·管理员专属：/broadcast 发起群发、/addtarget 登记目标群、/listtargets 管理目标、/adddraft 存文案、/listdrafts 管理文案、/whereami 查群ID）"
     )
 
 
