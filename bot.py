@@ -1,7 +1,10 @@
+import ast
 import asyncio
+import functools
 import html
 import json
 import logging
+import operator
 import os
 import re
 import sys
@@ -15,6 +18,7 @@ except ImportError:
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.error import BadRequest, ChatMigrated, RetryAfter, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters,
     ConversationHandler, CallbackQueryHandler,
@@ -64,6 +68,11 @@ ADDRESS_LOG_FILE = os.path.join(_data_dir, "usdt_addresses.json")
 MY_ADDRESS_FILE = os.path.join(_data_dir, "my_address.json")
 GLOBAL_BILL_ARCHIVE_FILE = os.path.join(_data_dir, "global_bill_archive.json")
 PENDING_SCANS_FILE = os.path.join(_data_dir, "pending_scans.json")
+TARGETS_FILE = os.path.join(_data_dir, "broadcast_targets.json")
+DRAFTS_FILE = os.path.join(_data_dir, "broadcast_drafts.json")
+SCHEDULE_FILE = os.path.join(_data_dir, "broadcast_schedules.json")
+KNOWN_GROUPS_FILE = os.path.join(_data_dir, "known_groups.json")
+JOBS_FILE = os.path.join(_data_dir, "broadcast_jobs.json")
 
 DEFAULT_LEDGER_SETTINGS = {
     "currency": "AUD",
@@ -83,7 +92,22 @@ DEFAULT_LEDGER_SETTINGS = {
 
 (
     ADDOP_WAIT,
-) = range(100, 101)
+    ADDTARGET_ID, ADDTARGET_GROUP, ADDTARGET_LABEL,
+    ADDDRAFT_NAME, ADDDRAFT_CONTENT,
+) = range(100, 106)
+
+NEWCAT_NAME = 300
+
+(
+    BC_TIMING_MENU,
+    BC_SCHED_ACTION,
+    BC_INPUT_TIME,
+    BC_CHOOSE_GROUP,
+    BC_CHOOSE_SOURCE,
+    BC_TYPING_CONTENT,
+    BC_CHOOSE_DRAFT,
+    BC_CONFIRM,
+) = range(200, 208)
 
 RE_SET_CURRENCY = re.compile(r"^设[置疑定](?:币种|货币)\s*([A-Za-z]+)$")
 RE_CHANGE_CURRENCY = re.compile(r"^修改(?:货币|币种)\s*([A-Za-z]+)\s*到\s*([A-Za-z]+)$")
@@ -884,6 +908,97 @@ async def try_handle_global_bill(update: Update, context: ContextTypes.DEFAULT_T
     return True
 
 
+# ---------- 本月总账单（跨群汇总本月，仅查看不结算）----------
+
+RE_MONTH_BILL = re.compile(r"^(?:本月总账单|月度总账单)$")
+
+
+async def build_month_bill_text(context: ContextTypes.DEFAULT_TYPE, header_chat_id) -> str:
+    """跨群汇总「本月」的进/出金额，只查看不结算。
+    「本月」= 发指令这个群当前账期日期所在的月份（跟全局账单表头取日期的口径一致）。
+    数据来源跟「全局账单MM-DD」是同一套：
+    1）已归档：每次日切都会往 global_bill_archive.json 写一条，账期日期属于本月的所有天累加；
+    2）还没日切：该群当前账期日期属于本月时，再加上实时的未结算进/出金额。
+    日切会清空该群流水，只有归档能还原历史，所以只有归档启用之后日切过的日子才统计得到。
+    本月没有任何记录（笔数和进出金额都是 0）的群不显示。"""
+    header_tz = get_ledger_tz(header_chat_id)
+    target_month = get_period_label(header_chat_id, header_tz)[:7]
+
+    archive = load_global_archive()
+    chat_ids = sorted(set(get_all_ledger_chat_ids()) | set(archive.keys()), key=int)
+
+    group_lines = []
+    total_in = 0.0
+    total_out = 0.0
+    total_txn_count = 0
+    count_groups = 0
+
+    for chat_id_str in chat_ids:
+        chat_id = int(chat_id_str)
+        tz = get_ledger_tz(chat_id)
+
+        in_amount = 0.0
+        out_amount = 0.0
+        count = 0
+
+        for date_str, day in archive.get(chat_id_str, {}).items():
+            if date_str[:7] == target_month:
+                in_amount += day.get("total_in_amount", 0.0)
+                out_amount += day.get("total_out_amount", 0.0)
+                count += day.get("total_count", 0)
+
+        if get_period_label(chat_id, tz)[:7] == target_month:
+            deposit_totals = get_today_totals(chat_id, tz)
+            disburse_items, disburse_totals = get_today_disburse(chat_id, tz)
+            in_amount += sum(deposit_totals.values())
+            out_amount += -sum(disburse_totals.values())
+            count += len(_period_entries(chat_id))
+
+        in_amount = round(in_amount, 4)
+        out_amount = round(out_amount, 4)
+        if count == 0 and in_amount == 0 and out_amount == 0:
+            continue
+
+        try:
+            chat = await context.bot.get_chat(chat_id)
+            name = chat.title or chat.full_name or str(chat_id)
+        except Exception:
+            name = str(chat_id)
+        name = html.escape(name)
+
+        group_lines.append(f"{name} 进：{_fmt_num(in_amount)} 出：{_fmt_num(out_amount)}")
+        total_in += in_amount
+        total_out += out_amount
+        total_txn_count += count
+        count_groups += 1
+
+    total_in = round(total_in, 4)
+    total_out = round(total_out, 4)
+
+    group_block = "\n".join(group_lines) if group_lines else "（本月暂无任何群的数据）"
+    lines = [f"📅 {target_month} 本月总账单", "", f"<blockquote>{group_block}</blockquote>", ""]
+    lines.append(f"<b>共计群数</b>：{count_groups}")
+    lines.append(f"<b>笔数</b>：{total_txn_count}")
+    lines.append(f"<b>总进金额</b>：{_fmt_num(total_in)}")
+    lines.append(f"<b>总出金额</b>：{_fmt_num(total_out)}")
+    lines.append(f"<b>GrandTotal</b>：{_fmt_num(round(total_in - total_out, 4))}")
+
+    return "\n".join(lines)
+
+
+async def try_handle_month_bill(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """匹配「本月总账单」/「月度总账单」，只查看不清空、不日切。"""
+    if not RE_MONTH_BILL.match(text):
+        return False
+    if not is_operator(update.effective_user):
+        await update.message.reply_text("只有管理员/操作员能查看本月总账单")
+        return True
+    text_out = await build_month_bill_text(context, update.effective_chat.id)
+    await update.message.reply_text(text_out, parse_mode="HTML")
+    return True
+
+
+
 # ---------- 清空 / 结算 ----------
 
 def clear_ledger_today(chat_id):
@@ -1569,6 +1684,1402 @@ async def try_handle_my_address(update: Update, context: ContextTypes.DEFAULT_TY
 
     return False
 
+# ==================== 群发广播 ====================
+# 时间统一按 UTC+8 计算（和记账默认时区一致）。管理员专属。
+# 已启用的定时群发任务保存在 broadcast_jobs.json，Bot 启动时由 restore_bc_jobs() 自动恢复。
+
+BC_TZ = timezone(timedelta(hours=8))
+# strptime 太宽松（会把 9:5 当成 09:05），先用正则强制分钟必须两位，避免手滑导致定时发错时间
+RE_BC_DAILY_TIME = re.compile(r"^\d{1,2}:\d{2}$")
+RE_BC_ONCE_TIME = re.compile(r"^\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{2}$")
+
+_KNOWN_GROUPS_CACHE = None
+
+
+def admin_only_cb(func):
+    """给按钮回调加管理员检查：列表按钮发在群里时，非管理员点了也不会生效。"""
+    @functools.wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if not is_admin(update.effective_user):
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+            return None
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+async def _safe_edit(query, text, reply_markup=None):
+    """编辑消息；内容没变化时 Telegram 会报 Message is not modified，这里直接忽略。"""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
+
+
+def _edit_sender(query):
+    async def _send(text, reply_markup=None):
+        await _safe_edit(query, text, reply_markup)
+    return _send
+
+
+async def _reply(update: Update, text: str, reply_markup=None):
+    """统一回复：来自按钮就编辑原消息，来自文字指令就发新消息。"""
+    if update.callback_query:
+        await _safe_edit(update.callback_query, text, reply_markup)
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+def load_targets():
+    data = load_json(TARGETS_FILE, {})
+    changed = False
+    for info in data.values():
+        if "groups" not in info:
+            old_group = info.pop("group", None)
+            info["groups"] = [old_group] if old_group else []
+            changed = True
+    if changed:
+        save_json(TARGETS_FILE, data)
+    return data
+
+
+def save_targets(data):
+    save_json(TARGETS_FILE, data)
+
+
+def load_drafts():
+    return load_json(DRAFTS_FILE, {})
+
+
+def save_drafts(data):
+    save_json(DRAFTS_FILE, data)
+
+
+def load_schedules():
+    return load_json(SCHEDULE_FILE, {})
+
+
+def save_schedules(data):
+    save_json(SCHEDULE_FILE, data)
+
+
+def load_known_groups():
+    # 每条群消息都会查一次，缓存在内存里，避免反复读文件
+    global _KNOWN_GROUPS_CACHE
+    if _KNOWN_GROUPS_CACHE is None:
+        _KNOWN_GROUPS_CACHE = load_json(KNOWN_GROUPS_FILE, {})
+    return _KNOWN_GROUPS_CACHE
+
+
+def save_known_groups(data):
+    global _KNOWN_GROUPS_CACHE
+    _KNOWN_GROUPS_CACHE = data
+    save_json(KNOWN_GROUPS_FILE, data)
+
+
+async def track_known_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """全局追踪：Bot 在哪些群/频道出现过，攒成清单，给 /addtarget 第一步做按钮选。只有新群或群名变化时才写文件。"""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup", "channel"):
+        return
+    data = load_known_groups()
+    info = {"title": chat.title or "", "type": chat.type}
+    if data.get(str(chat.id)) == info:
+        return
+    data[str(chat.id)] = info
+    save_known_groups(data)
+
+
+async def fetch_chat_display_name(bot, chat_id: int):
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.title:
+            return chat.title
+        full_name = " ".join(filter(None, [chat.first_name, chat.last_name]))
+        return full_name or (f"@{chat.username}" if chat.username else None)
+    except TelegramError:
+        return None
+
+
+async def whereami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        return
+    await update.message.reply_text(
+        f"这个聊天室的ID是：\n`{update.effective_chat.id}`",
+        parse_mode="Markdown",
+    )
+
+
+# ---------- 群发目标 ----------
+
+def get_targets_list():
+    data = load_targets()
+    return sorted(data.items(), key=lambda kv: (",".join(sorted(kv[1].get("groups", []))), kv[1].get("label", "")))
+
+
+def _target_display(info: dict) -> str:
+    real = info.get("real_name")
+    label = info.get("label", "未定义")
+    groups = info.get("groups") or ["默认组"]
+    group_str = "/".join(groups)
+
+    if real and real != label:
+        return f"{real} ({label})［{group_str}］"
+    return f"{real or label}［{group_str}］"
+
+
+def build_targets_page(page, items=None):
+    if items is None:
+        items = get_targets_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    if page_items:
+        lines = [f"📋 已登记目标（共 {total} 个）— 第 {page}/{pages} 页", "", "点击可移除："]
+    else:
+        lines = ["📋 已登记目标（共 0 个）", "", "（暂无目标，点下方添加）"]
+    text = "\n".join(lines)
+
+    buttons = [
+        [InlineKeyboardButton(_target_display(info), callback_data=f"lt:rm:{cid}")]
+        for cid, info in page_items
+    ]
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"lt:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="lt:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"lt:page:{page + 1}"))
+    buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("➕ 添加目标", callback_data="lt:add")])
+    buttons.append([InlineKeyboardButton("📂 返回分类列表", callback_data="lt:catlist")])
+    buttons.append([InlineKeyboardButton("🔄 刷新群名", callback_data=f"lt:refresh:{page}")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="lt:close")])
+
+    return text, InlineKeyboardMarkup(buttons), page
+
+
+def build_category_list():
+    targets = load_targets()
+    categories = sorted({g for info in targets.values() for g in info.get("groups", [])})
+    lines = ["📂 分类管理", ""]
+    if categories:
+        lines.append(f"共 {len(categories)} 个分类，点击进入编辑成员：")
+    else:
+        lines.append("（暂无分类，点下方新建）")
+    text = "\n".join(lines)
+    buttons = [[InlineKeyboardButton(f"📁 {c}", callback_data=f"lt:cat:{c}")] for c in categories]
+    buttons.append([InlineKeyboardButton("➕ 新建分类", callback_data="lt:newcat")])
+    buttons.append([InlineKeyboardButton("➕ 添加目标", callback_data="lt:add")])
+    buttons.append([InlineKeyboardButton("🗑 管理/移除全部目标", callback_data="lt:page:1")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="lt:close")])
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def _category_matrix(category, page, pending):
+    items = get_targets_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    lines = [f"「{category}」分类编辑 已勾选 {len(pending)}", ""]
+    rows = []
+    btn_row = []
+    for i, (cid, info) in enumerate(page_items):
+        num = start + i + 1
+        checked = "☑" if cid in pending else "☐"
+        name = info.get("real_name") or info.get("label", "未定义")
+        lines.append(f"{checked} {num} {name}")
+        btn_row.append(InlineKeyboardButton(str(num), callback_data=f"lt:tg:{cid}"))
+        if len(btn_row) == 5:
+            rows.append(btn_row)
+            btn_row = []
+    if btn_row:
+        rows.append(btn_row)
+
+    lines.append("")
+    lines.append(f"▶第({page})页 共计{total}条")
+    text = "\n".join(lines)
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"lt:catpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"第{page}/{pages}页", callback_data="lt:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"lt:catpage:{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton("💾 保存", callback_data="lt:catsave")])
+    rows.append([InlineKeyboardButton("🔙 返回", callback_data="lt:catback")])
+    return text, InlineKeyboardMarkup(rows), page
+
+
+def _clear_category_state(context):
+    context.user_data.pop("lt_cat", None)
+    context.user_data.pop("lt_cat_pending", None)
+    context.user_data.pop("lt_cat_page", None)
+
+
+async def category_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _clear_category_state(context)
+    text, kb = build_category_list()
+    await _safe_edit(query, text, kb)
+
+
+async def category_open_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = query.data.split(":", 2)[2]
+    targets = load_targets()
+    pending = {cid for cid, info in targets.items() if name in info.get("groups", [])}
+    context.user_data["lt_cat"] = name
+    context.user_data["lt_cat_pending"] = pending
+    context.user_data["lt_cat_page"] = 1
+    text, kb, _ = _category_matrix(name, 1, pending)
+    await _safe_edit(query, text, kb)
+
+
+async def category_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = context.user_data.get("lt_cat")
+    if not name:
+        await _safe_edit(query, "会话已过期，请重新 /listtargets")
+        return
+    page = int(query.data.split(":", 2)[2])
+    pending = context.user_data.get("lt_cat_pending", set())
+    context.user_data["lt_cat_page"] = page
+    text, kb, _ = _category_matrix(name, page, pending)
+    await _safe_edit(query, text, kb)
+
+
+async def category_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    name = context.user_data.get("lt_cat")
+    if not name:
+        await _safe_edit(query, "会话已过期，请重新 /listtargets")
+        return
+    cid = query.data.split(":", 2)[2]
+    pending = context.user_data.setdefault("lt_cat_pending", set())
+    if cid in pending:
+        pending.discard(cid)
+    else:
+        pending.add(cid)
+    page = context.user_data.get("lt_cat_page", 1)
+    text, kb, _ = _category_matrix(name, page, pending)
+    await _safe_edit(query, text, kb)
+
+
+async def category_save_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    name = context.user_data.pop("lt_cat", None)
+    pending = context.user_data.pop("lt_cat_pending", set())
+    context.user_data.pop("lt_cat_page", None)
+    if not name:
+        await query.answer()
+        await _safe_edit(query, "会话已过期，请重新 /listtargets")
+        return
+    await query.answer("已保存")
+    data = load_targets()
+    for cid, info in data.items():
+        groups = set(info.get("groups", []))
+        if cid in pending:
+            groups.add(name)
+        else:
+            groups.discard(name)
+        info["groups"] = sorted(groups)
+    save_targets(data)
+    text, kb = build_category_list()
+    await _safe_edit(query, text, kb)
+
+
+async def category_back_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _clear_category_state(context)
+    text, kb = build_category_list()
+    await _safe_edit(query, text, kb)
+
+
+async def newcat_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _safe_edit(query, "请输入新分类名称：\n发 /cancel 取消")
+    return NEWCAT_NAME
+
+
+async def newcat_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    context.user_data["lt_cat"] = name
+    context.user_data["lt_cat_pending"] = set()
+    context.user_data["lt_cat_page"] = 1
+    text, kb, _ = _category_matrix(name, 1, set())
+    await update.message.reply_text(f"✅ 新分类「{name}」，勾选成员后点保存生效：\n\n{text}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+newcat_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(admin_only_cb(newcat_start_cb), pattern="^lt:newcat$")],
+    states={
+        NEWCAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, newcat_receive_name)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+async def listtargets_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb = build_category_list()
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def removetarget_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await listtargets_cmd(update, context)
+
+
+async def listtargets_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_targets_page(page)
+    await _safe_edit(query, text, kb)
+
+
+async def listtargets_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def listtargets_refresh_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("正在刷新群名...")
+    page = int(query.data.split(":")[2])
+
+    data = load_targets()
+    updated, failed = 0, 0
+    for cid_str in list(data.keys()):
+        name = await fetch_chat_display_name(context.bot, int(cid_str))
+        if name:
+            data[cid_str]["real_name"] = name
+            updated += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)
+    save_targets(data)
+
+    text, kb, _ = build_targets_page(page)
+    prefix = f"🔄 刷新完成：成功 {updated} 个"
+    if failed:
+        prefix += f"，{failed} 个查不到（可能Bot已被移出该群）"
+    await _safe_edit(query, f"{prefix}\n\n{text}", kb)
+
+
+async def listtargets_rm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cid = query.data.split(":", 2)[2]
+    items = get_targets_list()
+    idx = next((i for i, (c, _) in enumerate(items) if c == cid), 0)
+    page = idx // PAGE_SIZE + 1
+    info = next((info for c, info in items if c == cid), None)
+    label = _target_display(info) if info else cid
+
+    text = f"确定要移除「{label}」（ID: {cid}）吗？"
+    buttons = [
+        [InlineKeyboardButton("✅ 确认移除", callback_data=f"lt:rmconfirm:{cid}:{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"lt:cancel:{page}")],
+    ]
+    await _safe_edit(query, text, InlineKeyboardMarkup(buttons))
+
+
+async def listtargets_rmconfirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, cid, page = query.data.split(":", 3)
+    data = load_targets()
+    removed = data.pop(cid, None)
+    save_targets(data)
+    text, kb, _ = build_targets_page(int(page))
+    prefix = f"✅ 已移除：{_target_display(removed)}\n\n" if removed else ""
+    await _safe_edit(query, f"{prefix}{text}", kb)
+
+
+async def listtargets_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_targets_page(page)
+    await _safe_edit(query, text, kb)
+
+
+async def listtargets_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _safe_edit(query, "已关闭")
+
+
+# ---------- 登记目标 /addtarget ----------
+
+async def addtarget_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        if update.callback_query:
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+        else:
+            await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+
+    known = load_known_groups()
+    if not known:
+        await _reply(
+            update,
+            "第1步：请输入聊天室ID\n"
+            "（还没追踪到任何群——Bot需要先在目标群里收到过至少一条消息才能自动识别。"
+            "也可以手动输入：把Bot拉进那个群/频道，在群里发一条消息，"
+            "然后私聊Bot发 /whereami 并转发那条消息过来）\n"
+            "发 /cancel 取消",
+        )
+        return ADDTARGET_ID
+
+    buttons = [
+        [InlineKeyboardButton(info.get("title") or cid, callback_data=f"at:pick:{cid}")]
+        for cid, info in known.items()
+    ]
+    buttons.append([InlineKeyboardButton("✍️ 手动输入群ID", callback_data="at:manual")])
+    await _reply(update, "第1步：选择要登记的群组，或手动输入ID：", reply_markup=InlineKeyboardMarkup(buttons))
+    return ADDTARGET_ID
+
+
+def _all_known_groups(extra=None):
+    groups = set()
+    for info in load_targets().values():
+        groups.update(info.get("groups", []))
+    if extra:
+        groups.update(extra)
+    return sorted(groups)
+
+
+async def _show_group_multiselect(send_func, context: ContextTypes.DEFAULT_TYPE, prefix=""):
+    selected = context.user_data.setdefault("at_groups", set())
+    all_groups = _all_known_groups(selected)
+    buttons = [
+        [InlineKeyboardButton(("✅ " if g in selected else "⬜ ") + g, callback_data=f"at:grp:{g}")]
+        for g in all_groups
+    ]
+    if selected:
+        buttons.append([InlineKeyboardButton(f"✅ 完成（已选 {len(selected)} 个分组）", callback_data="at:grp:done")])
+    hint = "，也可以继续输入新分组名" if all_groups else ""
+    selected_str = "、".join(sorted(selected)) if selected else "（无）"
+    text = f"{prefix}第2步：点击切换勾选分组{hint}，未选择时请直接输入新分组名：\n已选：{selected_str}"
+    if buttons:
+        await send_func(text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await send_func(text)
+    return ADDTARGET_GROUP
+
+
+async def _addtarget_after_id(send_func, context: ContextTypes.DEFAULT_TYPE, chat_id: int, real_name):
+    if real_name is None:
+        prefix = "⚠️ 查不到真实群名（可能Bot还没加入该群）。仍会继续，稍后可点「🔄 刷新群名」。\n\n"
+    else:
+        prefix = f"✅ 已识别真实群名：{real_name}\n\n"
+
+    context.user_data["at_id"] = chat_id
+    context.user_data["at_real_name"] = real_name
+    context.user_data["at_groups"] = set()
+
+    return await _show_group_multiselect(send_func, context, prefix=prefix)
+
+
+async def addtarget_pick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = int(query.data.split(":", 2)[2])
+    info = load_known_groups().get(str(chat_id), {})
+    real_name = info.get("title") or await fetch_chat_display_name(context.bot, chat_id)
+    return await _addtarget_after_id(_edit_sender(query), context, chat_id, real_name)
+
+
+async def addtarget_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _safe_edit(
+        query,
+        "请输入聊天室ID：\n"
+        "（不知道ID的话：把Bot拉进那个群/频道，在群里发一条消息，"
+        "然后私聊Bot发 /whereami 并转发那条消息过来）",
+    )
+    return ADDTARGET_ID
+
+
+async def addtarget_receive_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("聊天室ID必须是数字，请重新输入：")
+        return ADDTARGET_ID
+
+    real_name = await fetch_chat_display_name(context.bot, chat_id)
+    return await _addtarget_after_id(update.message.reply_text, context, chat_id, real_name)
+
+
+async def _ask_label(send_func, prefix=""):
+    buttons = [[InlineKeyboardButton("⏭ 跳过（用真实群名/分组名当备注）", callback_data="at:skiplabel")]]
+    await send_func(f"{prefix}第3步：请输入自定义备注名，或点击跳过：", reply_markup=InlineKeyboardMarkup(buttons))
+    return ADDTARGET_LABEL
+
+
+async def addtarget_group_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    g = query.data.split(":", 2)[2]
+    selected = context.user_data.setdefault("at_groups", set())
+    if g in selected:
+        selected.discard(g)
+    else:
+        selected.add(g)
+    return await _show_group_multiselect(_edit_sender(query), context)
+
+
+async def addtarget_group_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    selected = context.user_data.get("at_groups", set())
+    if not selected:
+        await query.answer("请至少选择一个分组", show_alert=True)
+        return ADDTARGET_GROUP
+    await query.answer()
+    return await _ask_label(_edit_sender(query), prefix=f"分组：{'、'.join(sorted(selected))}\n\n")
+
+
+async def addtarget_receive_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    selected = context.user_data.setdefault("at_groups", set())
+    selected.add(name)
+    return await _show_group_multiselect(update.message.reply_text, context)
+
+
+async def _addtarget_save(update: Update, context: ContextTypes.DEFAULT_TYPE, label: str):
+    chat_id = context.user_data.pop("at_id")
+    groups = sorted(context.user_data.pop("at_groups", set()))
+    real_name = context.user_data.pop("at_real_name", None)
+    data = load_targets()
+    data[str(chat_id)] = {"groups": groups, "label": label, "real_name": real_name}
+    save_targets(data)
+    text, kb, _ = build_targets_page(1)
+    shown_name = f"{real_name} ({label})" if real_name and real_name != label else (real_name or label)
+    group_str = "、".join(groups) if groups else "（无分组）"
+    msg = f"✅ 已登记：{shown_name}（ID: {chat_id}）→ 分组「{group_str}」\n\n{text}"
+    await _reply(update, msg, reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def addtarget_receive_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _addtarget_save(update, context, update.message.text.strip())
+
+
+def _skip_label_fallback(context):
+    return context.user_data.get("at_real_name") or "、".join(sorted(context.user_data.get("at_groups", set())))
+
+
+async def addtarget_skip_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _addtarget_save(update, context, _skip_label_fallback(context))
+
+
+async def addtarget_skiplabel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    return await _addtarget_save(update, context, _skip_label_fallback(context))
+
+
+addtarget_conv = ConversationHandler(
+    entry_points=[
+        CommandHandler("addtarget", addtarget_start),
+        CallbackQueryHandler(addtarget_start, pattern="^lt:add$"),
+    ],
+    states={
+        ADDTARGET_ID: [
+            CallbackQueryHandler(addtarget_pick_cb, pattern="^at:pick:"),
+            CallbackQueryHandler(addtarget_manual_cb, pattern="^at:manual$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_id),
+        ],
+        ADDTARGET_GROUP: [
+            CallbackQueryHandler(addtarget_group_done_cb, pattern="^at:grp:done$"),
+            CallbackQueryHandler(addtarget_group_toggle_cb, pattern="^at:grp:"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_group),
+        ],
+        ADDTARGET_LABEL: [
+            CommandHandler("skip", addtarget_skip_label),
+            CallbackQueryHandler(addtarget_skiplabel_cb, pattern="^at:skiplabel$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, addtarget_receive_label),
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+# ---------- 文案库 /adddraft /listdrafts ----------
+
+def get_drafts_list():
+    return sorted(load_drafts().items(), key=lambda kv: kv[0])
+
+
+def build_drafts_page(page, items=None):
+    if items is None:
+        items = get_drafts_list()
+    total = len(items)
+    pages = total_pages(total)
+    page = max(1, min(page, pages))
+    start = (page - 1) * PAGE_SIZE
+    page_items = items[start:start + PAGE_SIZE]
+
+    if page_items:
+        lines = [f"📋 文案库（共 {total} 份）— 第 {page}/{pages} 页", "", "点击可删除："]
+    else:
+        lines = ["📋 文案库（共 0 份）", "", "（暂无文案，点下方添加）"]
+    text = "\n".join(lines)
+
+    buttons = []
+    for i, (name, content) in enumerate(page_items, start=start):
+        preview = content if len(content) <= 15 else content[:15] + "..."
+        buttons.append([InlineKeyboardButton(f"📄 {name}：{preview}", callback_data=f"ld:rm:{i}")])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀ 上一页", callback_data=f"ld:page:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page}/{pages}", callback_data="ld:noop"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("下一页 ▶", callback_data=f"ld:page:{page + 1}"))
+    buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton("➕ 添加文案", callback_data="ld:add")])
+    buttons.append([InlineKeyboardButton("❌ 关闭", callback_data="ld:close")])
+
+    return text, InlineKeyboardMarkup(buttons), page
+
+
+async def listdrafts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return
+    text, kb, _ = build_drafts_page(1)
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def listdrafts_page_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_drafts_page(page)
+    await _safe_edit(query, text, kb)
+
+
+async def listdrafts_noop_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+async def listdrafts_rm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[2])
+    items = get_drafts_list()
+    if idx >= len(items):
+        text, kb, _ = build_drafts_page(1, items)
+        await _safe_edit(query, "该文案已不存在\n\n" + text, kb)
+        return
+    name, content = items[idx]
+    page = idx // PAGE_SIZE + 1
+    preview = content if len(content) <= 100 else content[:100] + "..."
+    text = f"确定要删除文案「{name}」吗？\n\n{preview}"
+    buttons = [
+        [InlineKeyboardButton("✅ 确认删除", callback_data=f"ld:rmconfirm:{idx}:{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"ld:cancel:{page}")],
+    ]
+    await _safe_edit(query, text, InlineKeyboardMarkup(buttons))
+
+
+async def listdrafts_rmconfirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, _, idx, page = query.data.split(":", 3)
+    idx = int(idx)
+    items = get_drafts_list()
+    removed_name = None
+    if idx < len(items):
+        removed_name = items[idx][0]
+        data = load_drafts()
+        data.pop(removed_name, None)
+        save_drafts(data)
+    text, kb, _ = build_drafts_page(int(page))
+    prefix = f"✅ 已删除「{removed_name}」\n\n" if removed_name else ""
+    await _safe_edit(query, f"{prefix}{text}", kb)
+
+
+async def listdrafts_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[2])
+    text, kb, _ = build_drafts_page(page)
+    await _safe_edit(query, text, kb)
+
+
+async def listdrafts_close_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _safe_edit(query, "已关闭")
+
+
+async def adddraft_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user):
+        if update.callback_query:
+            await update.callback_query.answer("只有管理员能执行此操作", show_alert=True)
+        else:
+            await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
+    await _reply(update, "第1步：请输入文案名称（标签/名字）\n发 /cancel 取消")
+    return ADDDRAFT_NAME
+
+
+async def adddraft_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["ad_name"] = update.message.text.strip()
+    await update.message.reply_text("第2步：请输入文案内容")
+    return ADDDRAFT_CONTENT
+
+
+async def adddraft_receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = context.user_data.pop("ad_name")
+    content = update.message.text
+    data = load_drafts()
+    data[name] = content
+    save_drafts(data)
+    text, kb, _ = build_drafts_page(1)
+    await update.message.reply_text(f"✅ 已保存文案「{name}」\n\n{text}", reply_markup=kb)
+    return ConversationHandler.END
+
+
+adddraft_conv = ConversationHandler(
+    entry_points=[
+        CommandHandler("adddraft", adddraft_start),
+        CallbackQueryHandler(adddraft_start, pattern="^ld:add$"),
+    ],
+    states={
+        ADDDRAFT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, adddraft_receive_name)],
+        ADDDRAFT_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adddraft_receive_content)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+)
+
+
+# ---------- 群发流程 /broadcast ----------
+
+def _parse_once_time(s: str):
+    """单次定时的时间字符串 -> 带 UTC+8 时区的 datetime。格式不对会抛 ValueError。"""
+    return datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=BC_TZ)
+
+
+def _clear_bc_state(context):
+    for k in [k for k in context.user_data if k.startswith("bc_")]:
+        context.user_data.pop(k, None)
+    context.user_data.pop("temp_sched_type", None)
+
+
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """【步骤 1】：先选择立即发送，或配置定时 Schedule"""
+    if not is_admin(update.effective_user):
+        await update.message.reply_text("只有管理员能执行此操作")
+        return ConversationHandler.END
+
+    if not load_targets():
+        await update.message.reply_text("还没有登记任何群发目标，请先用 /addtarget 添加")
+        return ConversationHandler.END
+
+    buttons = [
+        [InlineKeyboardButton("🚀 立即发送", callback_data="bc_time:now")],
+        [InlineKeyboardButton("⏰ 管理/新建定时任务 (Schedule)", callback_data="bc_time:sched")],
+        [InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")],
+    ]
+    await _reply(update, "📌【步骤 1/4】请选择广播发送的时间方式：", reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_TIMING_MENU
+
+
+async def bc_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _clear_bc_state(context)
+    await _safe_edit(query, "已取消群发操作")
+    return ConversationHandler.END
+
+
+async def bc_timing_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "bc_time:now":
+        context.user_data["bc_timing_type"] = "now"
+        context.user_data["bc_time_val"] = None
+        return await _ask_group_step(_edit_sender(query), context)
+
+    return await _show_schedule_list(_edit_sender(query))
+
+
+async def _show_schedule_list(send_func):
+    """显示已有 Schedule（选用、删除、新增）"""
+    schedules = load_schedules()
+    now = datetime.now(BC_TZ)
+    buttons = []
+
+    lines = ["⏰ 已保存的定时时间（选用后再选分组和文案，时间均为 UTC+8）：", ""]
+    if not schedules:
+        lines.append("（暂无已保存的定时时间）")
+    for sid, sinfo in schedules.items():
+        time_str = sinfo["time"]
+        expired = False
+        if sinfo["type"] == "daily":
+            stype = "每日循环"
+        else:
+            stype = "单次定时"
+            try:
+                expired = _parse_once_time(time_str) <= now
+            except ValueError:
+                expired = True
+        lines.append(f"🔹 [{stype}] {time_str}{'（已过期）' if expired else ''}")
+        row = []
+        if not expired:
+            row.append(InlineKeyboardButton(f"✏️ 选用 {time_str}", callback_data=f"sched_select:{sid}"))
+        row.append(InlineKeyboardButton("🗑️ 删除", callback_data=f"sched_del:{sid}"))
+        buttons.append(row)
+
+    bc_jobs = load_bc_jobs()
+    if bc_jobs:
+        lines.append("")
+        lines.append("🚀 已启用的定时群发任务（Bot 重启后自动恢复）：")
+        for jid, jinfo in bc_jobs.items():
+            stype = "每日" if jinfo.get("type") == "daily" else "单次"
+            preview = (jinfo.get("content") or "").replace("\n", " ")
+            preview = preview if len(preview) <= 15 else preview[:15] + "..."
+            lines.append(f"🔸 [{stype}] {jinfo.get('time')} → {_bc_group_label(jinfo.get('group'))}：{preview}")
+            buttons.append([InlineKeyboardButton(f"🗑 取消 [{stype}] {jinfo.get('time')}", callback_data=f"bc_job_del:{jid}")])
+
+    buttons.append([InlineKeyboardButton("➕ 添加「单次定时」时间", callback_data="sched_add:once")])
+    buttons.append([InlineKeyboardButton("🔄 添加「每日固定时间」循环", callback_data="sched_add:daily")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    await send_func("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_SCHED_ACTION
+
+
+async def bc_sched_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data.startswith("bc_job_del:"):
+        jid = data.split(":", 1)[1]
+        existed = _remove_bc_job(context.job_queue, jid)
+        await query.answer("已取消该定时群发任务" if existed else "该任务已不存在", show_alert=True)
+        return await _show_schedule_list(_edit_sender(query))
+
+    if data.startswith("sched_del:"):
+        sid = data.split(":", 1)[1]
+        schedules = load_schedules()
+        schedules.pop(sid, None)
+        save_schedules(schedules)
+        await query.answer("已删除该定时设置", show_alert=True)
+        return await _show_schedule_list(_edit_sender(query))
+
+    if data.startswith("sched_select:"):
+        sid = data.split(":", 1)[1]
+        sinfo = load_schedules().get(sid)
+        if not sinfo:
+            await query.answer("该定时设置已不存在", show_alert=True)
+            return await _show_schedule_list(_edit_sender(query))
+        await query.answer()
+        context.user_data["bc_timing_type"] = sinfo["type"]
+        context.user_data["bc_time_val"] = sinfo["time"]
+        return await _ask_group_step(_edit_sender(query), context)
+
+    # sched_add:once / sched_add:daily
+    await query.answer()
+    stype = data.split(":", 1)[1]
+    context.user_data["temp_sched_type"] = stype
+    if stype == "daily":
+        await _safe_edit(query, "请输入每日固定的时间（UTC+8），格式：HH:MM（例如：09:30）")
+    else:
+        await _safe_edit(query, "请输入具体发送日期时间（UTC+8），格式：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）")
+    return BC_INPUT_TIME
+
+
+async def bc_input_time_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    stype = context.user_data.get("temp_sched_type", "once")
+
+    if stype == "daily":
+        try:
+            if not RE_BC_DAILY_TIME.match(text):
+                raise ValueError
+            text = datetime.strptime(text, "%H:%M").strftime("%H:%M")
+        except ValueError:
+            await update.message.reply_text("格式不正确，请输入正确的24小时制时间（例如：09:30）：")
+            return BC_INPUT_TIME
+    else:
+        try:
+            if not RE_BC_ONCE_TIME.match(text):
+                raise ValueError
+            dt = _parse_once_time(text)
+        except ValueError:
+            await update.message.reply_text("格式不正确，请输入：YYYY-MM-DD HH:MM（例如：2026-08-05 09:00）：")
+            return BC_INPUT_TIME
+        if dt <= datetime.now(BC_TZ):
+            await update.message.reply_text("该时间已过去，请输入未来的时间：")
+            return BC_INPUT_TIME
+        text = dt.strftime("%Y-%m-%d %H:%M")
+
+    schedules = load_schedules()
+    sid = str(int(datetime.now().timestamp()))
+    schedules[sid] = {"type": stype, "time": text}
+    save_schedules(schedules)
+
+    context.user_data["bc_timing_type"] = stype
+    context.user_data["bc_time_val"] = text
+
+    await update.message.reply_text("✅ 定时保存成功！")
+    return await _ask_group_step(update.message.reply_text, context)
+
+
+async def _ask_group_step(send_func, context):
+    """【步骤 2】：选择目标分组"""
+    targets = load_targets()
+    groups = sorted({g for info in targets.values() for g in info.get("groups", [])})
+    context.user_data["bc_group_list"] = groups  # 按钮里只放序号，避免分组名太长超过 callback_data 的 64 字节限制
+    buttons = [[InlineKeyboardButton(g, callback_data=f"bc_grp:{i}")] for i, g in enumerate(groups)]
+    buttons.append([InlineKeyboardButton("📢 全部分组", callback_data="bc_grp:__ALL__")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    await send_func("👥【步骤 2/4】请选择要发送的目标群体分组：", reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_CHOOSE_GROUP
+
+
+async def bc_choose_group_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    raw = query.data.split(":", 1)[1]
+    if raw == "__ALL__":
+        group = "__ALL__"
+    else:
+        try:
+            group = context.user_data.get("bc_group_list", [])[int(raw)]
+        except (ValueError, IndexError):
+            await _safe_edit(query, "选项已失效，请重新发送 /broadcast")
+            _clear_bc_state(context)
+            return ConversationHandler.END
+    context.user_data["bc_group"] = group
+
+    # 【步骤 3】：选择新文案 / 已有文案模板
+    buttons = [[InlineKeyboardButton("✍️ 临时编写新文案", callback_data="bc_src:new")]]
+    if load_drafts():
+        buttons.append([InlineKeyboardButton("📄 选择已有文案模板", callback_data="bc_src:draft")])
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+
+    label = "全部分组" if group == "__ALL__" else group
+    await _safe_edit(
+        query,
+        f"目标分组：{label}\n\n📝【步骤 3/4】请选择文案来源：",
+        InlineKeyboardMarkup(buttons),
+    )
+    return BC_CHOOSE_SOURCE
+
+
+async def bc_choose_source_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "bc_src:new":
+        await _safe_edit(query, "请输入要群发的文案内容：")
+        return BC_TYPING_CONTENT
+
+    # 【步骤 4】：从文案库选择
+    names = sorted(load_drafts())
+    context.user_data["bc_draft_list"] = names
+    buttons = [[InlineKeyboardButton(f"🏷️ {name}", callback_data=f"bc_draft:{i}")] for i, name in enumerate(names)]
+    buttons.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+    await _safe_edit(query, "🏷️【步骤 4/4】请选择对应的文案标签：", InlineKeyboardMarkup(buttons))
+    return BC_CHOOSE_DRAFT
+
+
+async def bc_choose_draft_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        name = context.user_data.get("bc_draft_list", [])[int(query.data.split(":", 1)[1])]
+    except (ValueError, IndexError):
+        await _safe_edit(query, "选项已失效，请重新发送 /broadcast")
+        _clear_bc_state(context)
+        return ConversationHandler.END
+    context.user_data["bc_draft_tag"] = name
+    context.user_data["bc_content"] = load_drafts().get(name, "")
+    return await _show_confirm(_edit_sender(query), context)
+
+
+async def bc_typing_content_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["bc_draft_tag"] = "临时自定义文案"
+    context.user_data["bc_content"] = update.message.text
+    return await _show_confirm(update.message.reply_text, context)
+
+
+async def _show_confirm(send_func, context):
+    group = context.user_data.get("bc_group")
+    content = context.user_data.get("bc_content", "")
+    timing_type = context.user_data.get("bc_timing_type")
+    time_val = context.user_data.get("bc_time_val")
+    tag = context.user_data.get("bc_draft_tag", "自定义")
+
+    group_label = "全部分组" if group == "__ALL__" else group
+    if timing_type == "now":
+        when_label = "🚀 立即发送"
+    elif timing_type == "daily":
+        when_label = f"🔄 每日固定 {time_val}（UTC+8）循环群发"
+    else:
+        when_label = f"⏰ 指定时间 {time_val}（UTC+8）"
+
+    preview = content if len(content) <= 150 else content[:150] + "..."
+
+    summary = (
+        "📋 请核对最终群发配置：\n\n"
+        f"1️⃣ 发送时间：{when_label}\n"
+        f"2️⃣ 目标群体分组：{group_label}\n"
+        f"3️⃣ 文案标签：{tag}\n"
+        f"4️⃣ 预览内容：\n{preview}"
+    )
+    buttons = [
+        [InlineKeyboardButton("✅ 确认并启动", callback_data="bc_confirm:yes")],
+        [InlineKeyboardButton("❌ 取消", callback_data="bc_confirm:no")],
+    ]
+    await send_func(summary, reply_markup=InlineKeyboardMarkup(buttons))
+    return BC_CONFIRM
+
+
+async def bc_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "bc_confirm:no":
+        await _safe_edit(query, "已取消操作")
+        _clear_bc_state(context)
+        return ConversationHandler.END
+
+    group = context.user_data["bc_group"]
+    content = context.user_data["bc_content"]
+    timing_type = context.user_data["bc_timing_type"]
+    time_val = context.user_data["bc_time_val"]
+    admin_chat_id = update.effective_chat.id
+    job_info = {
+        "type": timing_type, "time": time_val, "group": group,
+        "content": content, "admin_chat_id": admin_chat_id,
+    }
+
+    if timing_type == "now":
+        await _safe_edit(query, "🚀 开始进行即时群发...")
+        await do_broadcast(context.bot, group, content, admin_chat_id)
+    else:
+        if timing_type == "once" and _parse_once_time(time_val) <= datetime.now(BC_TZ):
+            await _safe_edit(query, f"该定时时间 {time_val} 已过去，任务未创建，请重新 /broadcast 设置。")
+            _clear_bc_state(context)
+            return ConversationHandler.END
+        jid = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        jobs = load_bc_jobs()
+        jobs[jid] = job_info
+        save_bc_jobs(jobs)
+        _register_bc_job(context.job_queue, jid, job_info)
+        if timing_type == "daily":
+            msg = f"✅ 每日循环任务已设置！每日 {time_val}（UTC+8）准时发送。"
+        else:
+            msg = f"⏰ 单次定时任务已设定，将在 {time_val}（UTC+8）触发发送。"
+        await _safe_edit(query, msg + "\nBot 重启后会自动恢复；可在 /broadcast → 定时任务 里查看或取消。")
+
+    _clear_bc_state(context)
+    return ConversationHandler.END
+
+
+BC_JOB_PREFIX = "bc:"
+
+
+def load_bc_jobs():
+    return load_json(JOBS_FILE, {})
+
+
+def save_bc_jobs(data):
+    save_json(JOBS_FILE, data)
+
+
+def _bc_group_label(group):
+    return "全部分组" if group == "__ALL__" else str(group)
+
+
+def _register_bc_job(job_queue, jid, info):
+    """把一条定时群发任务注册进 JobQueue（新建任务和重启恢复共用）。"""
+    job_data = {
+        "jid": jid,
+        "type": info["type"],
+        "group": info["group"],
+        "content": info["content"],
+        "admin_chat_id": info["admin_chat_id"],
+    }
+    name = BC_JOB_PREFIX + jid
+    if info["type"] == "daily":
+        t = datetime.strptime(info["time"], "%H:%M")
+        job_queue.run_daily(
+            scheduled_broadcast_job,
+            time=dt_time(hour=t.hour, minute=t.minute, tzinfo=BC_TZ),
+            data=job_data,
+            name=name,
+        )
+    else:
+        job_queue.run_once(scheduled_broadcast_job, when=_parse_once_time(info["time"]), data=job_data, name=name)
+
+
+def _remove_bc_job(job_queue, jid) -> bool:
+    """取消一条定时群发任务：同时从 JobQueue 和文件里删除。返回该任务之前是否存在。"""
+    for job in job_queue.get_jobs_by_name(BC_JOB_PREFIX + jid):
+        job.schedule_removal()
+    jobs = load_bc_jobs()
+    existed = jobs.pop(jid, None) is not None
+    if existed:
+        save_bc_jobs(jobs)
+    return existed
+
+
+async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    d = context.job.data
+    if d.get("type") == "once":
+        # 单次任务先从文件里删掉再发送：即使发送过程中 Bot 挂了，重启后也不会重复发一遍
+        jobs = load_bc_jobs()
+        if jobs.pop(d.get("jid"), None) is not None:
+            save_bc_jobs(jobs)
+    await do_broadcast(context.bot, d["group"], d["content"], d["admin_chat_id"])
+
+
+async def restore_bc_jobs(application):
+    """Bot 启动时，把 broadcast_jobs.json 里的定时群发任务重新注册回 JobQueue。
+    - 每日任务：直接恢复，Bot 离线期间错过的那一次不补发，下一次照常发。
+    - 单次任务：时间还没到就恢复；离线期间已经过点的不补发（时间过了再发可能已经不合适），
+      从文件里删掉，并私信当初设置任务的管理员。"""
+    jobs = load_bc_jobs()
+    if not jobs:
+        return
+    now = datetime.now(BC_TZ)
+    restored = 0
+    missed = []
+    for jid, info in list(jobs.items()):
+        try:
+            if info["type"] == "once" and _parse_once_time(info["time"]) <= now:
+                missed.append((jid, info))
+                continue
+            _register_bc_job(application.job_queue, jid, info)
+            restored += 1
+        except Exception:
+            logger.exception("恢复定时群发任务失败 jid=%s（已保留在文件里，可在 /broadcast 里取消）", jid)
+
+    if missed:
+        for jid, _ in missed:
+            jobs.pop(jid, None)
+        save_bc_jobs(jobs)
+        for jid, info in missed:
+            preview = (info.get("content") or "").replace("\n", " ")
+            preview = preview if len(preview) <= 30 else preview[:30] + "..."
+            try:
+                await application.bot.send_message(
+                    chat_id=info.get("admin_chat_id"),
+                    text=(
+                        "⚠️ Bot 离线期间错过了一条单次定时群发，未补发：\n"
+                        f"计划时间：{info.get('time')}（UTC+8）\n"
+                        f"目标分组：{_bc_group_label(info.get('group'))}\n"
+                        f"文案：{preview}\n"
+                        "如需发送，请重新 /broadcast 设置。"
+                    ),
+                )
+            except TelegramError:
+                logger.warning("通知管理员错过的定时群发失败 admin_chat_id=%s", info.get("admin_chat_id"))
+    logger.info("定时群发任务恢复完成：恢复 %d 个，离线错过 %d 个", restored, len(missed))
+
+
+async def _send_broadcast_message(bot, chat_id, content):
+    try:
+        await bot.send_message(chat_id=chat_id, text=content)
+    except RetryAfter as e:  # 触发 Telegram 限流：等一等再重试一次
+        delay = e.retry_after
+        delay = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
+        await asyncio.sleep(delay + 1)
+        await bot.send_message(chat_id=chat_id, text=content)
+
+
+async def do_broadcast(bot, group, content, admin_chat_id):
+    targets = load_targets()
+    if group == "__ALL__":
+        chat_ids = [int(cid) for cid in targets.keys()]
+    else:
+        chat_ids = [int(cid) for cid, info in targets.items() if group in info.get("groups", [])]
+
+    if not chat_ids:
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text="⚠️ 群发未执行：该分组下没有登记任何目标。")
+        except TelegramError:
+            logger.warning("群发结果通知管理员失败 admin_chat_id=%s", admin_chat_id)
+        return
+
+    success, failed = 0, []
+    migrated = {}
+    for chat_id in chat_ids:
+        try:
+            await _send_broadcast_message(bot, chat_id, content)
+            success += 1
+        except ChatMigrated as e:
+            new_id = e.new_chat_id
+            migrated[chat_id] = new_id
+            try:
+                await _send_broadcast_message(bot, new_id, content)
+                success += 1
+            except TelegramError as e2:
+                failed.append(f"{chat_id}→{new_id}（{e2.message}）")
+        except TelegramError as e:
+            failed.append(f"{chat_id}（{e.message}）")
+        await asyncio.sleep(0.05)
+
+    if migrated:
+        data = load_targets()
+        for old_id, new_id in migrated.items():
+            info = data.pop(str(old_id), None)
+            if info:
+                data[str(new_id)] = info
+        save_targets(data)
+
+    report = f"✅ 群发完成\n成功：{success}\n失败：{len(failed)}"
+    if migrated:
+        report += f"\n\n🔄 有 {len(migrated)} 个群升级为超级群，ID已自动更新：\n" + "\n".join(f"{o}→{n}" for o, n in migrated.items())
+    if failed:
+        report += "\n\n失败详情：\n" + "\n".join(failed[:20])
+    try:
+        await bot.send_message(chat_id=admin_chat_id, text=report)
+    except TelegramError:
+        logger.warning("群发结果通知管理员失败 admin_chat_id=%s", admin_chat_id)
+
+
+broadcast_conv = ConversationHandler(
+    entry_points=[CommandHandler("broadcast", broadcast_start)],
+    states={
+        BC_TIMING_MENU: [CallbackQueryHandler(bc_timing_menu_cb, pattern="^bc_time:")],
+        BC_SCHED_ACTION: [CallbackQueryHandler(bc_sched_action_cb, pattern="^(sched_(del|select|add)|bc_job_del):")],
+        BC_INPUT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_input_time_receive)],
+        BC_CHOOSE_GROUP: [CallbackQueryHandler(bc_choose_group_cb, pattern="^bc_grp:")],
+        BC_CHOOSE_SOURCE: [CallbackQueryHandler(bc_choose_source_cb, pattern="^bc_src:")],
+        BC_TYPING_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bc_typing_content_receive)],
+        BC_CHOOSE_DRAFT: [CallbackQueryHandler(bc_choose_draft_cb, pattern="^bc_draft:")],
+        BC_CONFIRM: [CallbackQueryHandler(bc_confirm_cb, pattern="^bc_confirm:")],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel_conversation),
+        CallbackQueryHandler(bc_cancel_cb, pattern="^bc_cancel$"),
+    ],
+)
+
+# ---------- 回调 ----------
+
+# ==================== 计算器 ====================
+# - 只有整条消息全是「数字 + 运算符 + 括号」时才触发，不会误伤带文字的记账指令（如 KY +50 T）。
+# - 必须排在 try_handle_ledger_entry 之前：否则「3+5」会被「代号 +金额」的记账规则当成代号 3 入账。
+# - 以 +/- 开头的消息（如 -5*2）仍然交给记账处理。
+# - 不使用 eval：用 ast 只放行 + - * / 和括号，** 等其他写法一律忽略，避免 9**9**9 之类的算式卡死 Bot。
+
+# 只在计算器内部使用，不动全局 normalize()，避免影响记账备注等其他功能
+CALC_CHAR_MAP = {
+    "×": "*", "✕": "*", "＊": "*",
+    "÷": "/", "／": "/",
+    "。": ".", "．": ".",
+}
+CALC_ALLOWED_CHARS = set("0123456789+-*/(). ")
+CALC_MAX_LEN = 200
+RE_CALC_DATE_LIKE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")  # 2026-09-10 这种日期不当算式
+RE_CALC_LEADING_ZEROS = re.compile(r"\b0+(\d)")               # 007+1 -> 7+1（Python 不接受前导零）
+
+_CALC_BIN_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+}
+_CALC_UNARY_OPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _calc_eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _calc_eval_node(node.body)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _CALC_BIN_OPS:
+        return _CALC_BIN_OPS[type(node.op)](_calc_eval_node(node.left), _calc_eval_node(node.right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _CALC_UNARY_OPS:
+        return _CALC_UNARY_OPS[type(node.op)](_calc_eval_node(node.operand))
+    raise ValueError("unsupported expression")
+
+
+async def try_handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """整条消息是纯算式（如 3+5*2、(10-3)*2/4）就直接回结果并返回 True；否则返回 False 交给后面的逻辑。"""
+    expr = text
+    for cn, en in CALC_CHAR_MAP.items():
+        expr = expr.replace(cn, en)
+    expr = expr.strip()
+
+    if not expr or len(expr) > CALC_MAX_LEN:
+        return False
+    if not all(c in CALC_ALLOWED_CHARS for c in expr):
+        return False
+    if expr[0] in "+-":  # +100 / -50 是记账
+        return False
+    if RE_CALC_DATE_LIKE.match(expr):
+        return False
+    if not any(c in "+-*/" for c in expr) or not any(c.isdigit() for c in expr):
+        return False
+
+    try:
+        tree = ast.parse(RE_CALC_LEADING_ZEROS.sub(r"\1", expr), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    # 至少要有一次二元运算（排除 (5)、(-5) 这类不是算式的写法）
+    if not any(isinstance(n, ast.BinOp) for n in ast.walk(tree)):
+        return False
+
+    try:
+        result = _calc_eval_node(tree)
+    except ZeroDivisionError:
+        await update.message.reply_text("不能除以0哦～")
+        return True
+    except Exception:
+        return False
+
+    if isinstance(result, float):
+        if result != result or result in (float("inf"), float("-inf")):
+            return False
+        await update.message.reply_text(f"{round(result, 2):.2f}")
+    else:
+        await update.message.reply_text(str(result))
+    return True
+
+
+
 # ---------- 回调 ----------
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1595,10 +3106,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await try_handle_global_bill(update, context, text):
         return
 
+    if await try_handle_month_bill(update, context, text):
+        return
+
     if await try_handle_ledger_settings(update, context, text):
         return
 
     if await try_handle_ledger_revoke(update, context, text):
+        return
+
+    if await try_handle_calculator(update, context, text):
         return
 
     if await try_handle_ledger_entry(update, context, text):
@@ -1780,12 +3297,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "查看/取消自动日切：发「日切时间」/「取消日切」\n"
         "全局账单：发「全局账单」或「独立日切账单」，汇总与您账期同日的各群进/出金额（只查看不清空）\n"
         "按日期查：发「全局账单09-16」这样带日期（月-日，今年），查那天各群的数据\n"
-        "撤销某笔：回复那条记账消息发「撤销」，恢复发「撤销恢复」\n\n"
+        "撤销某笔：回复那条记账消息发「撤销」，恢复发「撤销恢复」\n"
+        "本月总账单：发「本月总账单」（或「月度总账单」），汇总各群本月进/出金额（只查看不清空）\n"
+        "计算器：直接发算式即可，例如 3+5*2 或 (10-3)*2/4（支持 + - * / 和括号）\n\n"
         "USDT地址查重：群里谁发的消息里带地址（TRC20/ERC20）都会自动检测，"  
         "如果这个地址之前出现过，会提示是谁第一次发的、什么时候发的\n"
         "TRON钱包信息：发TRC20地址（T开头）还会自动查该地址的创建日期、可用带宽/能量、"
         "多签安全状态、USDT/TRX余额\n\n"      
-        "（管理员专属：/addoperator /removeoperator /listoperators）"
+        "（管理员专属：/addoperator /removeoperator /listoperators）\n"
+        "（群发广播·管理员专属：/addtarget /removetarget /listtargets /adddraft /listdrafts /broadcast /whereami）"
     )
 
 
@@ -1811,6 +3331,38 @@ app.add_handler(CallbackQueryHandler(listoperators_rm_cb, pattern=r"^op:rm:(id|u
 app.add_handler(CallbackQueryHandler(listoperators_cancel_cb, pattern=r"^op:cancel:\d+$"))
 app.add_handler(CallbackQueryHandler(listoperators_close_cb, pattern=r"^op:close$"))
 app.add_handler(CallbackQueryHandler(listoperators_noop_cb, pattern=r"^op:noop$"))
+# ---------- 群发广播 handler ----------
+app.add_handler(addtarget_conv)
+app.add_handler(adddraft_conv)
+app.add_handler(broadcast_conv)
+app.add_handler(newcat_conv)
+
+app.add_handler(CommandHandler("listtargets", listtargets_cmd))
+app.add_handler(CommandHandler("removetarget", removetarget_alias))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_page_cb), pattern=r"^lt:page:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_refresh_cb), pattern=r"^lt:refresh:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_rmconfirm_cb), pattern=r"^lt:rmconfirm:"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_rm_cb), pattern=r"^lt:rm:"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_cancel_cb), pattern=r"^lt:cancel:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listtargets_close_cb), pattern=r"^lt:close$"))
+app.add_handler(CallbackQueryHandler(listtargets_noop_cb, pattern=r"^lt:noop$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_list_cb), pattern=r"^lt:catlist$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_open_cb), pattern=r"^lt:cat:"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_page_cb), pattern=r"^lt:catpage:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_toggle_cb), pattern=r"^lt:tg:"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_save_cb), pattern=r"^lt:catsave$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(category_back_cb), pattern=r"^lt:catback$"))
+
+app.add_handler(CommandHandler("listdrafts", listdrafts_cmd))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listdrafts_page_cb), pattern=r"^ld:page:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listdrafts_rmconfirm_cb), pattern=r"^ld:rmconfirm:"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listdrafts_rm_cb), pattern=r"^ld:rm:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listdrafts_cancel_cb), pattern=r"^ld:cancel:\d+$"))
+app.add_handler(CallbackQueryHandler(admin_only_cb(listdrafts_close_cb), pattern=r"^ld:close$"))
+app.add_handler(CallbackQueryHandler(listdrafts_noop_cb, pattern=r"^ld:noop$"))
+
+app.add_handler(CommandHandler("whereami", whereami))
+app.add_handler(MessageHandler(filters.ALL, track_known_group), group=1)
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 if app.job_queue is not None:
