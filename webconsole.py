@@ -782,7 +782,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "账单明细", subtitle: "Bill Details", sum: "总计",
       toDark: "切换到夜间模式", toLight: "切换到白天模式", export: "导出", exportedAt: "导出时间",
       exportPdf: "导出 PDF", exportXlsx: "导出 Excel", tIn: "入账", tOut: "下发", tGroup: "分组",
-      subtotal: "小计", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
+      subtotal: "小计", voidShort: "（另有 %d 笔已撤销，未计入）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
@@ -800,7 +800,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "Bill Details", subtitle: "账单明细", sum: "Total",
       toDark: "Switch to dark mode", toLight: "Switch to light mode", export: "Export", exportedAt: "Exported",
       exportPdf: "Export PDF", exportXlsx: "Export Excel", tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
-      subtotal: "Subtotal", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
+      subtotal: "Subtotal", voidShort: " (+%d voided, excluded)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
@@ -1070,7 +1070,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   function buildXlsx() {
     if (!VIEW) return null;
-    var all = VIEW.entries || [];
+    var allRows = VIEW.entries || [];
+    var voids = allRows.filter(function (e) { return e.voided; });
+    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销不计入、不列出
     var ins = all.filter(function (e) { return e.type !== "disburse"; });
     var outs = all.filter(function (e) { return e.type === "disburse"; });
     var gs = VIEW.groups || [];
@@ -1108,6 +1110,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (SESSION && SESSION.title) shTot.push([]);
     if (SESSION && SESSION.title) shTot.push([SESSION.title]);
     shTot.push([T("currencyLabel") + ": " + (VIEW.currency || "")]);
+    if (voids.length) shTot.push([T("voidShort").replace("%d", voids.length)]);
     var b = bounds();
     shTot.push([(b.start && b.end) ? (b.start.slice(0, 16) + " ~ " + b.end.slice(0, 16)) : ""]);
 
@@ -1191,12 +1194,13 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var stamp = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate()) +
                 " " + pad(now.getHours()) + ":" + pad(now.getMinutes());
 
-    var all = VIEW.entries || [];
+    var allRows = VIEW.entries || [];
+    var voids = allRows.filter(function (e) { return e.voided; });
+    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销不计入、不列出
     var ins = all.filter(function (e) { return e.type !== "disburse"; });
     var outs = all.filter(function (e) { return e.type === "disburse"; });
     var gs = VIEW.groups || [];
     var sumIn = 0, sumOut = 0, sumGrp = 0, gIn = 0, gOut = 0, gGrand = 0;
-    // 与页面上的卡片总计口径一致：把表里显示的每一行都算进去（含已作废的那行）
     ins.forEach(function (e) {
       sumIn += e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount);
     });
@@ -1218,7 +1222,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (ins.length) {
       ins.forEach(function (e) {
         var amt = e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount);
-        E.push('<tr' + (e.voided ? ' class="v"' : "") + "><td>" + esc(shortTime(e.time)) + "</td>" +
+        E.push("<tr><td>" + esc(shortTime(e.time)) + "</td>" +
                '<td class="n">' + esc(fsig(amt)) + "</td>" +
                "<td>" + esc(e.reply_user_name || "—") + "</td>" +
                "<td>" + esc(e.operator_name || "—") + "</td>" +
@@ -1238,7 +1242,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (outs.length) {
       outs.forEach(function (e) {
         var amt = e.net_amount;
-        E.push('<tr' + (e.voided ? ' class="v"' : "") + "><td>" + esc(shortTime(e.time)) + "</td>" +
+        E.push("<tr><td>" + esc(shortTime(e.time)) + "</td>" +
                '<td class="n">' + esc(fsig(amt)) + (e.fee ? "  (" + esc(t("thFee")) + " " + esc(fnum(e.fee)) + ")" : "") +
                "</td><td>—</td>" +
                "<td>" + esc(e.operator_name || "—") + "</td>" +
@@ -1271,6 +1275,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
     E.push('<div class="doc-total"><b>' + esc(t("total")) + "</b><span>" + esc(t("gIn")) + " " +
            esc(fnum(gIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fnum(gOut)) + "</span><span>" +
            esc(t("gGrand")) + " " + esc(fsig(gGrand)) + "</span></div>");
+    if (voids.length) {
+      E.push('<div class="doc-note">' + esc(t("voidShort").replace("%d", voids.length)) + "</div>");
+    }
     E.push('<div class="doc-foot">' + esc(t("exportedAt")) + " " + esc(stamp) + "</div>");
 
     $("pdfDoc").innerHTML = E.join("");
@@ -1284,6 +1291,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
       $(id).innerHTML = '<tr><td colspan="5" class="empty">' + esc(t("loading")) + "</td></tr>";
     });
     document.querySelectorAll(".tw").forEach(function (el) { el.setAttribute("aria-busy", "true"); });
+  }
+  function voidHint(n) {
+    return n ? t("voidShort").replace("%d", n) : "";
   }
   function renderCurrency() {
     $("curCode").textContent = (VIEW && VIEW.currency) || "—";
@@ -1321,8 +1331,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
     (VIEW.entries || []).forEach(function (e) {
       if (e.type === "disburse") outs.push(e); else ins.push(e);
     });
-    $("cntIn").textContent = ins.length + " " + (LANG === "zh" ? "笔" : "");
-    $("cntOut").textContent = outs.length + " " + (LANG === "zh" ? "笔" : "");
+    var unit = LANG === "zh" ? "笔" : "";
+    var insVoid = ins.filter(function (e) { return e.voided; }).length;
+    var outsVoid = outs.filter(function (e) { return e.voided; }).length;
+    $("cntIn").textContent = (ins.length - insVoid) + " " + unit + voidHint(insVoid);
+    $("cntOut").textContent = (outs.length - outsVoid) + " " + unit + voidHint(outsVoid);
     $("tbIn").innerHTML = ins.length ? ins.map(row).join("")
       : '<tr><td colspan="5" class="empty">' + esc(t("empty")) + "</td></tr>";
     $("tbOut").innerHTML = outs.length ? outs.map(row).join("")
@@ -1332,11 +1345,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var gs = VIEW.groups || [];
     var sumIn = 0, sumOut = 0, sumGrand = 0;
     gs.forEach(function (g) { sumIn += g.in_total; sumOut += g.out_total; sumGrand += g.grand; });
-    // 各表总计（入账 = 金额合计；下发 = 净额合计；分组 = 各组总账合计）
+    // 各表总计：只算未撤销的记录（与底部总计、Telegram 账单卡片口径一致）
     var sumInTbl = ins.reduce(function (s, e) {
+      if (e.voided) return s;
       return s + (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount));
     }, 0);
-    var sumOutTbl = outs.reduce(function (s, e) { return s + e.net_amount; }, 0);
+    var sumOutTbl = outs.reduce(function (s, e) { return e.voided ? s : s + e.net_amount; }, 0);
     var sIn = $("sumIn"), sOut = $("sumOut"), sGrp = $("sumGroup");
     sIn.textContent = t("sum") + " " + fsig(sumInTbl);
     sIn.className = "sum " + (sumInTbl >= 0 ? "in" : "neg");
