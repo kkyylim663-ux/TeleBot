@@ -2687,27 +2687,73 @@ def _console_authorized(user_id, username):
 
 
 def _console_entry_view(e):
-    """账本条目 → 网页展示格式（补齐手续费、来源标签；不暴露内部编号）。"""
+    """账本条目 → 网页展示格式（补齐手续费、来源标签、代号、被回复人；不暴露内部编号）。"""
     if e.get("type") == "disburse":
         fee = e.get("fee_flat")
         if fee is None:
-            fee = round(e.get("amount", 0) - abs(e.get("net_amount", 0)), 4)
+            fee = max(0.0, round(e.get("amount", 0) - abs(e.get("net_amount", 0)), 4))
     else:
         fee = 0.0
     src = e.get("source", "telegram")
     return {
         "time": e.get("time", ""), "type": e.get("type"),
-        "amount": e.get("amount", 0), "fee": fee,
+        "amount": e.get("amount", 0), "fee": fee, "fee_flat": fee,
         "net_amount": e.get("net_amount", 0), "currency": e.get("currency", ""),
         "note": e.get("note", ""), "operator_name": e.get("operator_name", ""),
         "voided": bool(e.get("voided")), "source": src,
         "source_label": {"web": "网页", "scan": "扫描单"}.get(src, "Telegram"),
+        "group": e.get("group", ""),
+        "sign": e.get("sign", ""),
+        "is_reversal": e.get("sign") == "+",
+        "reply_user_id": e.get("reply_user_id"),
+        "reply_user_name": e.get("reply_user_name", ""),
     }
 
 
-def _console_period_view(chat_id, period):
-    """网页控制台的汇总+明细视图，口径与「账单」卡片完全一致：
-    当前账期用实时账本原语统计；历史账期用日切归档（Bot 日切会清明细，历史只有汇总）。"""
+def _console_group_rows(entries):
+    """按分组代号汇总成「分组」表：每个代号一行。
+    总入金额 = 该代号 +记一笔 的原始金额合计；
+    总出金额 = 该代号 -记一笔 的原始金额合计 + 该代号下发的净流出（已扣手续费，冲正为负则回冲）；
+    总账 = 总入 − 总出。时间 = 该代号最近一笔的时间。只统计未撤销的记录。"""
+    stats = {}
+    order = []
+    for e in entries:
+        tag = e.get("group")
+        if not tag or e.get("voided"):
+            continue
+        if tag not in stats:
+            stats[tag] = {"tag": tag, "in_total": 0.0, "out_total": 0.0, "time": ""}
+            order.append(tag)
+        row = stats[tag]
+        t = e.get("type")
+        if t == "in":
+            row["in_total"] += float(e.get("amount", 0) or 0)
+        elif t == "out":
+            row["out_total"] += float(e.get("amount", 0) or 0)
+        elif t == "disburse":
+            # 正常下发把净额算进总出；冲正（net 为正）自动成为负贡献，把钱回冲
+            row["out_total"] += -float(e.get("net_amount", 0) or 0)
+        time_str = e.get("time", "")
+        if time_str > row["time"]:
+            row["time"] = time_str
+    rows = []
+    for tag in order:
+        row = stats[tag]
+        in_total = round(row["in_total"], 4)
+        out_total = round(row["out_total"], 4)
+        rows.append({
+            "tag": tag, "time": row["time"],
+            "in_total": in_total, "out_total": out_total,
+            "grand": round(in_total - out_total, 4),
+        })
+    return rows
+
+
+def _console_period_view(chat_id, period, start=None, end=None):
+    """网页控制台的明细视图：当前账期用实时账本原语统计；历史账期用日切归档（Bot 日切会清明细，历史只有汇总）。
+    start / end 为可选的 "YYYY-MM-DD HH:MM:SS" 时间区间（字符串比较，与 Bot 账期口径一致），
+    本群币种由 Telegram 侧统一管理（「修改币种 A到B」会把整个账单一起换），页面只做展示。
+    三张表与汇总都按同一份筛选结果计算，保证页面上看到的数字互相自洽。"""
     tz = get_ledger_tz(chat_id)
     label = get_period_label(chat_id, tz)
     settings = get_group_ledger_settings(chat_id)
@@ -2718,17 +2764,42 @@ def _console_period_view(chat_id, period):
             return None
         tin = round(day.get("total_in_amount", 0.0), 4)
         tout = round(day.get("total_out_amount", 0.0), 4)
+        cur = day.get("currency", settings["currency"])
         return {
             "period": period, "current": False,
-            "totals": [{"currency": day.get("currency", settings["currency"]),
-                        "in": tin, "out": -tout,
+            "currency": cur,
+            "totals": [{"currency": cur, "in": tin, "out": -tout,
                         "carried": None, "grand": round(day.get("settlement", 0.0), 4)}],
             "entries": [],
+            "groups": [{"tag": period, "time": period + " 00:00:00",
+                        "in_total": tin, "out_total": tout,
+                        "grand": round(day.get("settlement", 0.0), 4)}],
+            "count": day.get("total_count", 0),
             "note": "历史账期只有当日汇总（日切时明细按 Bot 规则已清空）",
         }
 
-    deposit_totals = get_today_totals(chat_id, tz)
-    _, disburse_totals = get_today_disburse(chat_id, tz)
+    ps = get_period_start_str(chat_id, tz)
+    entries = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
+    if start:
+        entries = [e for e in entries if e.get("time", "") >= start]
+    if end:
+        entries = [e for e in entries if e.get("time", "") <= end]
+    entries.sort(key=lambda x: x.get("time", ""))
+
+    # 汇总与三张表同源：都对上面这份筛选结果求和（不筛选时与 Telegram 账单卡片口径完全一致）
+    deposit_totals = {}
+    disburse_totals = {}
+    for e in entries:
+        if e.get("voided"):
+            continue
+        c = e.get("currency", settings["currency"])
+        t = e.get("type")
+        if t in ("in", "out"):
+            amt = float(e.get("amount", 0) or 0)
+            deposit_totals[c] = deposit_totals.get(c, 0.0) + (amt if t == "in" else -amt)
+        elif t == "disburse":
+            disburse_totals[c] = disburse_totals.get(c, 0.0) + float(e.get("net_amount", 0) or 0)
+
     carried = get_group_carryover(chat_id)
     currencies = []
     for c in [settings["currency"]] + list(deposit_totals) + list(disburse_totals) + list(carried):
@@ -2744,13 +2815,14 @@ def _console_period_view(chat_id, period):
             "carried": round(tc, 4) if isinstance(tc, (int, float)) else None,
             "grand": round(tin + tout, 4),
         })
-    ps = get_period_start_str(chat_id, tz)
-    entries = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
-    entries.sort(key=lambda x: x.get("time", ""))
     return {
         "period": label, "current": True,
+        "period_start": ps,
+        "currency": settings["currency"],
         "totals": totals,
         "entries": [_console_entry_view(e) for e in entries],
+        "groups": _console_group_rows(entries),
+        "count": len(entries),
         "note": "",
     }
 
