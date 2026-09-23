@@ -155,6 +155,24 @@ def normalize(text):
     return text
 
 
+def extract_reply_target(update) -> dict:
+    """取「被回复人」信息，供账单明细页「标记」列展示。
+
+    只在操作员主动回复**真人**消息时记录：回复 Bot 自己（记账卡片）或回复自己的消息都不算，
+    没回复就不写这两个字段。历史流水不回填，只对新记录生效。"""
+    reply = getattr(update.message, "reply_to_message", None)
+    if reply is None:
+        return {}
+    target = reply.from_user
+    if target is None or target.is_bot:
+        return {}
+    user = update.effective_user
+    if user is not None and target.id == user.id:
+        return {}
+    name = f"@{target.username}" if target.username else (target.full_name or str(target.id))
+    return {"reply_user_id": target.id, "reply_user_name": name}
+
+
 def load_json(path, default):
     if not os.path.exists(path):
         return default
@@ -1349,9 +1367,11 @@ async def try_handle_ledger_entry(update: Update, context: ContextTypes.DEFAULT_
 
     entry_type = "in" if sign == "+" else "out"
     operator_name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+    extra = {"user_message_id": update.message.message_id}
+    extra.update(extract_reply_target(update))
     entry = create_ledger_entry(
         chat_id, entry_type, amount, note, user.id, operator_name,
-        tag=tag, extra={"user_message_id": update.message.message_id},
+        tag=tag, extra=extra,
     )
 
     summary_text = build_ledger_summary(chat_id)
@@ -1400,6 +1420,7 @@ async def try_handle_ledger_disburse(update: Update, context: ContextTypes.DEFAU
     }
     if tag:
         entry["group"] = tag
+    entry.update(extract_reply_target(update))
 
     data_now = load_ledger_entries()
     entry["id"] = len(data_now.get(str(chat_id), [])) + 1
