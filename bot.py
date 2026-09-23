@@ -124,7 +124,9 @@ RE_VIEW_AUTO_CUT = re.compile(r"^(?:日切时间|查看日切时间|查看日切
 RE_RESET_AUTO_CUT = re.compile(r"^(?:重置日切|重置日切标记|测试日切)$")
 RE_LEDGER_ENTRY = re.compile(r"^([+-])\s*(\d+(?:\.\d+)?)\s*(.*)$", re.DOTALL)
 RE_LEDGER_ENTRY_TAGGED = re.compile(r"^([^\s+-]+)\s*([+-])\s*(\d+(?:\.\d+)?)\s*(.*)$", re.DOTALL)
-RE_LEDGER_DISBURSE = re.compile(r"^下发\s*([+-])?\s*(\d+(?:\.\d+)?)\s*(?:手续\s*(\d+(?:\.\d+)?)\s*)?(.*)$", re.DOTALL)
+RE_LEDGER_DISBURSE = re.compile(
+    r"^(?:([^\s+-]+)\s+)?下发\s*([+-])?\s*(\d+(?:\.\d+)?)\s*(?:手续\s*(\d+(?:\.\d+)?)\s*)?(.*)$", re.DOTALL
+)
 RE_REVOKE = re.compile(r"^撤销$")
 RE_REVOKE_RESTORE = re.compile(r"^撤销恢复$")
 RE_RETRACT = re.compile(r"^回撤$")
@@ -1367,11 +1369,11 @@ async def try_handle_ledger_entry(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def try_handle_ledger_disburse(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
-    """匹配「下发」指令：下发 2000 / 下发 -2000 手续20 备注。"""
+    """匹配「下发」指令：下发 2000 / 下发 -2000 手续20 备注；也支持带分组代号「KY 下发 2000」。"""
     m = RE_LEDGER_DISBURSE.match(text)
     if not m:
         return False
-    sign, amount_str, fee_override_str, note = m.groups()
+    tag, sign, amount_str, fee_override_str, note = m.groups()
     amount = float(amount_str)
     note = note.strip()
     chat_id = update.effective_chat.id
@@ -1396,6 +1398,8 @@ async def try_handle_ledger_disburse(update: Update, context: ContextTypes.DEFAU
         "operator_name": f"@{user.username}" if user.username else (user.full_name or str(user.id)),
         "time": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if tag:
+        entry["group"] = tag
 
     data_now = load_ledger_entries()
     entry["id"] = len(data_now.get(str(chat_id), [])) + 1
