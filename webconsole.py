@@ -786,7 +786,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
-      total: "总计", gIn: "总进", gOut: "总出", gGrand: "总账",
+      total: "总计", gIn: "总入金额", gOut: "总出金额", gGrand: "总账金额",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
       hintStart: "点一下开始日期", hintEnd: "再点一下结束日期", done: "完成",
@@ -804,7 +804,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
-      total: "Total", gIn: "In", gOut: "Out", gGrand: "Net",
+      total: "Total", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
       hintStart: "Tap the start date", hintEnd: "Tap the end date", done: "Done",
@@ -1104,9 +1104,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
                 gs.reduce(function (s, g) { return s + g.out_total; }, 0),
                 gs.reduce(function (s, g) { return s + g.grand; }, 0)]);
 
-    var shTot = [[T("total")], [T("gIn"), gs.reduce(function (s, g) { return s + g.in_total; }, 0)],
-                 [T("gOut"), gs.reduce(function (s, g) { return s + g.out_total; }, 0)],
-                 [T("gGrand"), gs.reduce(function (s, g) { return s + g.grand; }, 0)]];
+    var shTot = [[T("total")], [T("gIn"), sumIns], [T("gOut"), -sumNet],
+                 [T("gGrand"), sumIns + sumNet]];
     if (SESSION && SESSION.title) shTot.push([]);
     if (SESSION && SESSION.title) shTot.push([SESSION.title]);
     shTot.push([T("currencyLabel") + ": " + (VIEW.currency || "")]);
@@ -1272,9 +1271,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
     E.push("</tbody></table>");
 
     // 底部总计（与页面「总计」卡片一致）
+    // 底部总计：总入 = 入账表合计；总出 = 下发表净额（正数）；总账 = 总入 − 总出
+    var outAmount = -sumOut;
+    var netAmount = sumIn - outAmount;
     E.push('<div class="doc-total"><b>' + esc(t("total")) + "</b><span>" + esc(t("gIn")) + " " +
-           esc(fnum(gIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fnum(gOut)) + "</span><span>" +
-           esc(t("gGrand")) + " " + esc(fsig(gGrand)) + "</span></div>");
+           esc(fnum(sumIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fnum(outAmount)) + "</span><span>" +
+           esc(t("gGrand")) + " " + esc(fsig(netAmount)) + "</span></div>");
     if (voids.length) {
       E.push('<div class="doc-note">' + esc(t("voidShort").replace("%d", voids.length)) + "</div>");
     }
@@ -1341,10 +1343,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("tbOut").innerHTML = outs.length ? outs.map(row).join("")
       : '<tr><td colspan="5" class="empty">' + esc(t("empty")) + "</td></tr>";
 
-    // 分组表 + 底部总计（总进 / 总出 / 总账 = 各组之和）
+    // 分组表（各组之和）
     var gs = VIEW.groups || [];
-    var sumIn = 0, sumOut = 0, sumGrand = 0;
-    gs.forEach(function (g) { sumIn += g.in_total; sumOut += g.out_total; sumGrand += g.grand; });
+    var sumGrp = 0;
+    gs.forEach(function (g) { sumGrp += g.grand; });
     // 各表总计：只算未撤销的记录（与底部总计、Telegram 账单卡片口径一致）
     var sumInTbl = ins.reduce(function (s, e) {
       if (e.voided) return s;
@@ -1365,13 +1367,17 @@ PAGE_HTML = r"""<!DOCTYPE html>
         '<td class="r"><span class="amt out num">' + fnum(g.out_total) + "</span></td>" +
         '<td class="r"><span class="amt num ' + (g.grand >= 0 ? "in" : "out") + '">' + fsig(g.grand) + "</span></td></tr>";
     }).join("") : '<tr><td colspan="5" class="empty">' + esc(t("emptyGroup")) + "</td></tr>";
-    sGrp.textContent = t("sum") + " " + fsig(sumGrand);
-    sGrp.className = "sum " + (sumGrand >= 0 ? "in" : "neg");
-    $("gIn").textContent = fnum(sumIn);
-    $("gOut").textContent = fnum(sumOut);
+    sGrp.textContent = t("sum") + " " + fsig(sumGrp);
+    sGrp.className = "sum " + (sumGrp >= 0 ? "in" : "neg");
+    // 底部总计：总入金额 = 入账表合计；总出金额 = 下发表净额（取正数）；总账金额 = 总入 − 总出
+    // （入账表本身已含「- 记一笔」，分组只是它们的拆分，所以这里已包含分组）
+    var outAmount = -sumOutTbl;
+    var netAmount = sumInTbl - outAmount;
+    $("gIn").textContent = fnum(sumInTbl);
+    $("gOut").textContent = fnum(outAmount);
     var gg = $("gGrand");
-    gg.textContent = fsig(sumGrand);
-    gg.className = "num " + (sumGrand >= 0 ? "in" : "out");
+    gg.textContent = fsig(netAmount);
+    gg.className = "num " + (netAmount >= 0 ? "in" : "out");
     document.querySelectorAll(".tw").forEach(function (el) { el.removeAttribute("aria-busy"); });
   }
 
