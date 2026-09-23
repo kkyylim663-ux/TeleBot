@@ -593,8 +593,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .mark{color:var(--ink)}
   .mark.blank{color:var(--muted)}
   .note{max-width:280px;overflow:hidden;text-overflow:ellipsis}
-  .voided td{color:var(--muted);text-decoration:line-through}
-  .voided .amt{color:var(--muted)}
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
   .tot-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:2px 0 10px}
   .tot-grid>div{background:var(--chip);border-radius:12px;padding:10px 8px;text-align:center;
@@ -782,7 +780,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "账单明细", subtitle: "Bill Details", sum: "总计",
       toDark: "切换到夜间模式", toLight: "切换到白天模式", export: "导出", exportedAt: "导出时间",
       exportPdf: "导出 PDF", exportXlsx: "导出 Excel", tIn: "入账", tOut: "下发", tGroup: "分组",
-      subtotal: "小计", voidShort: "（另有 %d 笔已撤销，未计入）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
+      subtotal: "小计", voidShort: "（另有 %d 笔已撤销）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
@@ -800,7 +798,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "Bill Details", subtitle: "账单明细", sum: "Total",
       toDark: "Switch to dark mode", toLight: "Switch to light mode", export: "Export", exportedAt: "Exported",
       exportPdf: "Export PDF", exportXlsx: "Export Excel", tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
-      subtotal: "Subtotal", voidShort: " (+%d voided, excluded)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
+      subtotal: "Subtotal", voidShort: " (+%d voided)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
@@ -1320,7 +1318,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var mark = e.reply_user_name
       ? '<span class="mark">' + esc(e.reply_user_name) + "</span>"
       : '<span class="mark blank">—</span>';
-    return "<tr" + (e.voided ? ' class="voided"' : "") + ">" +
+    return "<tr>" +
       '<td class="num">' + esc(shortTime(e.time)) + "</td>" +
       '<td class="r">' + amountCell(e) + "</td>" +
       "<td>" + mark + "</td>" +
@@ -1329,15 +1327,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   function renderTables() {
     if (!VIEW) return;
-    var ins = [], outs = [];
-    (VIEW.entries || []).forEach(function (e) {
+    // 已撤销的记录不显示在页面上（只统计为提示笔数）
+    var allRows = VIEW.entries || [];
+    var ins = [], outs = [], insVoid = 0, outsVoid = 0;
+    allRows.forEach(function (e) {
+      if (e.voided) { if (e.type === "disburse") outsVoid++; else insVoid++; return; }
       if (e.type === "disburse") outs.push(e); else ins.push(e);
     });
     var unit = LANG === "zh" ? "笔" : "";
-    var insVoid = ins.filter(function (e) { return e.voided; }).length;
-    var outsVoid = outs.filter(function (e) { return e.voided; }).length;
-    $("cntIn").textContent = (ins.length - insVoid) + " " + unit + voidHint(insVoid);
-    $("cntOut").textContent = (outs.length - outsVoid) + " " + unit + voidHint(outsVoid);
+    $("cntIn").textContent = ins.length + " " + unit + voidHint(insVoid);
+    $("cntOut").textContent = outs.length + " " + unit + voidHint(outsVoid);
     $("tbIn").innerHTML = ins.length ? ins.map(row).join("")
       : '<tr><td colspan="5" class="empty">' + esc(t("empty")) + "</td></tr>";
     $("tbOut").innerHTML = outs.length ? outs.map(row).join("")
@@ -1349,10 +1348,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
     gs.forEach(function (g) { sumGrp += g.grand; });
     // 各表总计：只算未撤销的记录（与底部总计、Telegram 账单卡片口径一致）
     var sumInTbl = ins.reduce(function (s, e) {
-      if (e.voided) return s;
       return s + (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount));
     }, 0);
-    var sumOutTbl = outs.reduce(function (s, e) { return e.voided ? s : s + e.net_amount; }, 0);
+    var sumOutTbl = outs.reduce(function (s, e) { return s + e.net_amount; }, 0);
     var sIn = $("sumIn"), sOut = $("sumOut"), sGrp = $("sumGroup");
     sIn.textContent = t("sum") + " " + fsig(sumInTbl);
     sIn.className = "sum " + (sumInTbl >= 0 ? "in" : "neg");
