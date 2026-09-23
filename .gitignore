@@ -9,3 +9,6 @@ Bot 计算机.txt
 __pycache__/
 *.pyc
 .env
+
+# VPS 上的运行数据目录（本地文件，不进版本库）
+/data/
