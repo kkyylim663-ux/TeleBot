@@ -8,6 +8,7 @@ import operator
 import os
 import re
 import sys
+import tempfile
 import time as time_mod
 import urllib.error
 import urllib.request
@@ -16,6 +17,11 @@ try:
     import webconsole  # 账单明细网页控制台（同目录 webconsole.py）
 except ImportError:
     webconsole = None
+
+try:
+    import ocr_bill  # OCR 截图查重模块（同目录 ocr_bill.py，pip install rapidocr-onnxruntime）
+except ImportError:
+    ocr_bill = None
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -75,6 +81,7 @@ KNOWN_GROUPS_FILE = os.path.join(_data_dir, "known_groups.json")
 BLOCKED_FILE = os.path.join(_data_dir, "broadcast_blocked.json")
 JOBS_FILE = os.path.join(_data_dir, "broadcast_jobs.json")
 GROUP_TAGS_FILE = os.path.join(_data_dir, "group_tags.json")  # 分组代号白名单（全局一份，所有群共用）
+OCR_BILLS_FILE = os.path.join(_data_dir, "ocr_bills.json")  # OCR 截图查重库（全局一份，所有群共用）
 
 DEFAULT_LEDGER_SETTINGS = {
     "currency": "AUD",
@@ -2929,6 +2936,160 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await try_handle_my_address(update, context, text):
         return
 
+# ---------- OCR 截图查重监管（全局 · 静默模式）----------
+# 机制：Bot 所在所有群里的图片/截图都会被 OCR 识别并写入查重库 ocr_bills.json（不断入库），
+# 平时完全静默：不发言、不回复、不进正式账本。唯一出声点是发现重复时在群里回帖报警：
+#   ① 同图重发：Telegram file_unique_id 或 OCR 文字指纹命中（跨群全局比对）
+#   ② 单号/交易哈希已在查重库里（跨群全局比对）
+#   ③ 本群今日账本里已有同额未作废条目（疑似重复，提示人工核对）
+# OCR 模块缺失（未装 rapidocr-onnxruntime）时整段自动失效，Bot 其余功能不受影响。
+
+def load_ocr_bills():
+    return load_json(OCR_BILLS_FILE, [])
+
+
+def save_ocr_bills(data):
+    save_json(OCR_BILLS_FILE, data)
+
+
+_OCR_LOCK = asyncio.Lock()       # OCR 推理串行：防并发时内存叠加
+_OCR_MAX_RECORDS = 3000          # 查重库上限，超出丢最旧记录
+_OCR_ALERT_COOLDOWN = 120        # 同一指纹 120 秒内只报一次警，防连环重发刷屏
+_OCR_ALERT_SEEN = {}             # fingerprint -> 上次报警 time.time()
+
+
+def _ledger_same_day_same_amount(chat_id, amount):
+    """本群今日账本里有没有金额相同的未作废条目（同日同金额模糊比对）。找到返回该条目。"""
+    today = datetime.now(get_ledger_tz(chat_id)).strftime("%Y-%m-%d")
+    for e in load_ledger_entries().get(str(chat_id), []):
+        if e.get("voided") or e.get("type") not in ("in", "out"):
+            continue
+        try:
+            if abs(float(e.get("amount", 0)) - amount) > 1e-9:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if str(e.get("time", ""))[:10] == today:
+            return e
+    return None
+
+
+def _fmt_ocr_brief(ex):
+    """把提取字段拼成一行简报，用于重复报警里展示上次记录。"""
+    parts = []
+    if ex.get("amount") is not None:
+        cur = f" {ex['currency']}" if ex.get("currency") else ""
+        parts.append(f"金额 {ex['amount']:g}{cur}")
+    if ex.get("datetime"):
+        parts.append(f"时间 {ex['datetime']}")
+    if ex.get("order_ids"):
+        parts.append(f"单号 {ex['order_ids'][0]}")
+    return " ｜ ".join(parts) if parts else "（未识别出关键要素）"
+
+
+async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
+    """完整链路：下载 -> OCR -> 提取 -> 三级查重 -> 存档。平时静默，只有发现重复才回帖报警。"""
+    chat_id = chat.id
+    img_path = None
+    try:
+        tg_file = await context.bot.get_file(file_id)
+        fd, img_path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            await tg_file.download_to_drive(custom_path=img_path)
+            async with _OCR_LOCK:
+                ocr = await asyncio.get_running_loop().run_in_executor(
+                    None, ocr_bill.recognize_image, img_path
+                )
+        finally:
+            if img_path:
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+    except Exception:
+        logger.exception("OCR: 图片下载/识别失败（file_unique_id=%s）", file_unique_id)
+        return
+
+    raw_text = ocr.get("raw_text", "")
+    fingerprint = ocr_bill.fingerprint_text(raw_text)
+    line_fps = ocr_bill.line_fingerprints(raw_text)
+    parsed = ocr_bill.parse_bill(raw_text)
+    has_key = parsed["amount"] is not None or bool(parsed["order_ids"])
+
+    records = load_ocr_bills()
+    reason, prev = ocr_bill.find_duplicate(parsed, fingerprint, file_unique_id, records, line_fps)
+
+    # ③ 本群今日账本同额（只比当前群；换新设备重截的图 ①② 查不到时靠这条兜底）
+    if reason is None and parsed["amount"] is not None and chat.type in ("group", "supergroup"):
+        e = _ledger_same_day_same_amount(chat_id, parsed["amount"])
+        if e:
+            reason = "与本群今日账本同额（疑似，请人工核对）"
+            prev = {
+                "time": e.get("time"),
+                "chat_id": str(chat_id),
+                "extracted": {"amount": e.get("amount"), "currency": e.get("currency"),
+                              "datetime": e.get("time"), "order_ids": []},
+            }
+
+    record = {
+        "chat_id": str(chat_id),
+        "chat_title": getattr(chat, "title", "") or "",
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "file_unique_id": file_unique_id,
+        "file_id": file_id,
+        "fingerprint": fingerprint,
+        "line_fps": line_fps,
+        "raw_text": raw_text,          # OCR 转出的全文文字也存档，方便回溯核对
+        "extracted": parsed,
+        "status": "recorded" if has_key else "unparsed",
+    }
+
+    # 报警冷却：同指纹 120 秒内只报一次，连环重发同一张图不刷屏（但每次都照常入库）
+    will_alert = reason is not None
+    if will_alert:
+        now = time_mod.time()
+        if now - _OCR_ALERT_SEEN.get(fingerprint, 0) < _OCR_ALERT_COOLDOWN:
+            will_alert = False
+        else:
+            _OCR_ALERT_SEEN[fingerprint] = now
+
+    if len(records) >= _OCR_MAX_RECORDS:
+        records = records[-(_OCR_MAX_RECORDS - 1):]
+    records.append(record)
+    save_ocr_bills(records)
+
+    if not will_alert:
+        return  # 静默：查重通过 / 无异常 / 冷却期内，什么也不说
+
+    prev_where = "本群" if prev.get("chat_id") == str(chat_id) \
+        else f"群「{prev.get('chat_title') or prev.get('chat_id')}」"
+    text = (
+        "⚠️ 发现重复截图\n"
+        f"原因：{reason}\n"
+        f"上次：{prev.get('time', '')} · {prev_where}\n"
+        f"{_fmt_ocr_brief(prev.get('extracted') or {})}"
+    )
+    try:
+        await update.message.reply_text(text)  # 引用原截图回复——全流程唯一出声点
+    except Exception:
+        logger.exception("OCR: 重复报警发送失败")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot 所在所有群的图片全局监管：无操作员门槛，后台静默处理。"""
+    if ocr_bill is None:
+        return
+    msg = update.message
+    if msg.photo:
+        f = msg.photo[-1]  # 一条消息里多张图时取分辨率最大的那张
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        f = msg.document  # 按「文件」发送的图片是原图不压缩
+    else:
+        return
+    context.application.create_task(_ocr_process_photo(
+        update, context, f.file_id, f.file_unique_id, update.effective_chat))
+
 # ---------- 账单明细网页控制台（进程内嵌，实现见 webconsole.py）----------
 
 _CHAT_TITLES = {}  # 群名称缓存：网页页面顶部展示用
@@ -3271,6 +3432,8 @@ app.add_handler(MessageHandler(filters.ALL, track_known_group), group=1)
 app.add_error_handler(error_handler)
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# OCR 截图查重监管：Bot 所在所有群的照片/图片文件全局静默监控
+app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
 
 if app.job_queue is not None:
     app.job_queue.run_repeating(auto_cut_job, interval=5, first=5)
