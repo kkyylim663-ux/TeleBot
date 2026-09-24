@@ -3062,9 +3062,12 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
     if not will_alert:
         return  # 静默：查重通过 / 无异常 / 冷却期内，什么也不说
 
-    prev_where = "本群" if prev.get("chat_id") == str(chat_id) \
-        else f"群「{prev.get('chat_title') or prev.get('chat_id')}」"
-    text = "⚠️ 发现重复截图"
+    tz = get_ledger_tz(chat_id)
+    tz_label = f"UTC{tz.utcoffset(None).total_seconds() / 3600:+g}"
+    text = (
+        "⚠️ 发现重复截图\n"
+        f"上次：{prev.get('time', '')}（{tz_label}）"
+    )
     try:
         await update.message.reply_text(text)  # 引用原截图回复——全流程唯一出声点
     except Exception:
