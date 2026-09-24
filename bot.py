@@ -68,6 +68,7 @@ OPERATORS_FILE = os.path.join(_data_dir, "operators.json")
 ADDRESS_LOG_FILE = os.path.join(_data_dir, "usdt_addresses.json")
 MY_ADDRESS_FILE = os.path.join(_data_dir, "my_address.json")
 GLOBAL_BILL_ARCHIVE_FILE = os.path.join(_data_dir, "global_bill_archive.json")
+GLOBAL_ENTRIES_ARCHIVE_FILE = os.path.join(_data_dir, "global_entries_archive.json")
 PENDING_SCANS_FILE = os.path.join(_data_dir, "pending_scans.json")
 TARGETS_FILE = os.path.join(_data_dir, "broadcast_targets.json")  # 旧版「登记目标」，仅用于启动时一次性迁移
 KNOWN_GROUPS_FILE = os.path.join(_data_dir, "known_groups.json")
@@ -792,6 +793,27 @@ def record_global_archive(chat_id, date_str, settlement, total_in_amount, total_
     save_global_archive(data)
 
 
+def load_global_entries_archive():
+    return load_json(GLOBAL_ENTRIES_ARCHIVE_FILE, {})
+
+
+def save_global_entries_archive(data):
+    save_json(GLOBAL_ENTRIES_ARCHIVE_FILE, data)
+
+
+def record_global_entries(chat_id, label, batch):
+    """「日切/结束账单」时把该账期的明细（批次）按（群, 账期标签）追加进归档。
+    每次日切前上一批明细已从实时账本清空，批次之间天然不重叠，所以直接追加合并、不去重；
+    同一个账期标签日切多次（手动+自动，或重新校准后重开）都能完整留存，账单明细网页才能按日期查到历史批次。"""
+    if not batch:
+        return
+    data = load_global_entries_archive()
+    chat_archive = data.setdefault(str(chat_id), {})
+    chat_archive[label] = chat_archive.get(label, []) + list(batch)
+    data[str(chat_id)] = chat_archive
+    save_global_entries_archive(data)
+
+
 async def build_global_bill_for_date_text(context: ContextTypes.DEFAULT_TYPE, date_str: str) -> str:
     """查某个指定日期（YYYY-MM-DD）的全局账单，两种数据来源会合并显示：
     1）已归档：该群历史上某次日切时，结算的正好是这个日期；
@@ -1121,6 +1143,12 @@ def close_ledger_day(chat_id):
     # 归档：按「账期标签」（比如通过「设定日期」预设的日期）记录这次结算，而不是真实日历日期——
     # 这样即使提前把账期设成未来的日期再结算，「全局账单MM-DD」按这个日期也能查得到，跟实时查询的口径一致
     record_global_archive(chat_id, label, total_grand, total_in_amount, total_out_amount, total_count, cur)
+
+    # 明细批次归档：把该账期所有原始记录（含已作废的，作废只是标记不删数据）按账期标签留档，
+    # 账单明细网页才能用日历查到历史批次明细（否则清明细后历史就只剩汇总）
+    ps = get_period_start_str(chat_id, tz)
+    day_batch = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
+    record_global_entries(chat_id, label, day_batch)
 
     all_entries = load_ledger_entries()
     all_entries[str(chat_id)] = []
@@ -2750,7 +2778,7 @@ def _console_group_rows(entries):
 
 
 def _console_period_view(chat_id, period, start=None, end=None):
-    """网页控制台的明细视图：当前账期用实时账本原语统计；历史账期用日切归档（Bot 日切会清明细，历史只有汇总）。
+    """网页控制台的明细视图：当前账期用实时账本原语统计；历史账期和历史日期范围用日切归档的明细批次统计。
     start / end 为可选的 "YYYY-MM-DD HH:MM:SS" 时间区间（字符串比较，与 Bot 账期口径一致），
     本群币种由 Telegram 侧统一管理（「修改币种 A到B」会把整个账单一起换），页面只做展示。
     三张表与汇总都按同一份筛选结果计算，保证页面上看到的数字互相自洽。"""
@@ -2765,21 +2793,45 @@ def _console_period_view(chat_id, period, start=None, end=None):
         tin = round(day.get("total_in_amount", 0.0), 4)
         tout = round(day.get("total_out_amount", 0.0), 4)
         cur = day.get("currency", settings["currency"])
+        grand = round(day.get("settlement", 0.0), 4)
+        # 明细批次来自日切归档（明细归档功能上线前的旧日期没有归档明细，只有汇总）
+        batch = list(load_global_entries_archive().get(str(chat_id), {}).get(period, []))
+        if start:
+            batch = [e for e in batch if e.get("time", "") >= start]
+        if end:
+            batch = [e for e in batch if e.get("time", "") <= end]
+        batch.sort(key=lambda x: x.get("time", ""))
+        if batch:
+            return {
+                "period": period, "current": False,
+                "currency": cur,
+                "totals": [{"currency": cur, "in": tin, "out": -tout,
+                            "carried": None, "grand": grand}],
+                "entries": [_console_entry_view(e) for e in batch],
+                "groups": _console_group_rows(batch),
+                "count": len(batch),
+                "note": "历史账期明细来自日切归档",
+            }
         return {
             "period": period, "current": False,
             "currency": cur,
             "totals": [{"currency": cur, "in": tin, "out": -tout,
-                        "carried": None, "grand": round(day.get("settlement", 0.0), 4)}],
+                        "carried": None, "grand": grand}],
             "entries": [],
             "groups": [{"tag": period, "time": period + " 00:00:00",
                         "in_total": tin, "out_total": tout,
-                        "grand": round(day.get("settlement", 0.0), 4)}],
+                        "grand": grand}],
             "count": day.get("total_count", 0),
-            "note": "历史账期只有当日汇总（日切时明细按 Bot 规则已清空）",
+            "note": "该日期早于明细归档功能上线，只有当日汇总",
         }
 
     ps = get_period_start_str(chat_id, tz)
     entries = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
+    if start or end:
+        # 日历查询可能覆盖历史账期：把明细归档里的批次并入池子再筛选。
+        # 日切后实时账本已清明细，历史批次只存在归档里，两边天然不重叠，不会重复计数。
+        for old_batch in load_global_entries_archive().get(str(chat_id), {}).values():
+            entries.extend(old_batch)
     if start:
         entries = [e for e in entries if e.get("time", "") >= start]
     if end:
