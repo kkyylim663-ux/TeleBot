@@ -586,7 +586,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   tr:last-child td{border-bottom:0}
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
-  .r{text-align:right}
+  .r{text-align:center}
   .amt{font-weight:640}
   .amt.in{color:var(--in)} .amt.out{color:var(--out)} .amt.disb{color:var(--disb)}
   .suf{font-size:11px;color:var(--muted);font-weight:400;margin-left:5px}
@@ -662,7 +662,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
 </header>
 
 <div class="wrap">
-  </div>
 
   <div id="banner" class="banner" role="alert" aria-live="assertive" style="display:none"></div>
 
@@ -901,7 +900,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   function bounds() {
     return {
       start: R.startDate ? R.startDate + " " + R.startTime + ":00" : "",
-      end: R.endDate ? R.endDate + " " + R.endTime + ":00" : ""
+      end: R.endDate ? R.endDate + " " + R.endTime + ":59" : ""
     };
   }
   function renderRange() {
@@ -1304,12 +1303,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
           : (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount));
     var cls = e.type === "disburse" ? "disb" : (n >= 0 ? "in" : "out");
     var html = '<span class="amt ' + cls + ' num">' + fsig(n) + "</span>";
-    // 本群币种由 Telegram 统一管理，正常情况下整本同币种；
-    // 只有历史遗留的异币种记录（用「设置币种」而非「修改币种」换过）才标一下，避免金额被误读
-    var base = (VIEW && VIEW.currency) || "";
-    if (e.currency && base && e.currency !== base) {
-      html += '<span class="suf">' + esc(e.currency) + "</span>";
-    }
+    // 三张大组（入账/下发/分组）的金额格不显示货币单位：本群币种由 Telegram 统一管理，
+    // 即使换过币种这里也只显示数字，币种只看顶栏徽章
     if (e.is_reversal) html += '<span class="suf">' + esc(t("rev")) + "</span>";
     // 已撤销不再额外加「—」：整行已经灰掉+删除线，再加符号会跟金额挤在一起
     return html;
