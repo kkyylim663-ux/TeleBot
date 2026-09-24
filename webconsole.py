@@ -783,7 +783,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       exportPdf: "导出 PDF", exportXlsx: "导出 Excel", tIn: "入账", tOut: "下发", tGroup: "分组",
       subtotal: "小计", voidShort: "（另有 %d 笔已撤销）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
-      thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账", grandRow: "合计", unitRows: "笔", unitGroups: "组",
+      thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账金额", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
       total: "总计", gIn: "总入金额", gOut: "总出金额", gGrand: "总账金额",
       loading: "加载中…",
@@ -791,7 +791,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       hintStart: "点一下开始日期", hintEnd: "再点一下结束日期", done: "完成",
       tIn: "入账", tOut: "下发", tGroup: "分组",
       cTime: "时间", cAmt: "金额", cMark: "标记", cOp: "操作人", cNote: "备注",
-      cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账",
+      cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账金额",
       empty: "暂无记录", emptyGroup: "暂无分组数据", rev: "冲正", foot: "网页与 Telegram 共用同一份账本 · 只读查阅",
       histNote: "历史账期明细来自日切归档（更早的日期只有汇总）"
     },
@@ -801,7 +801,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       exportPdf: "Export PDF", exportXlsx: "Export Excel", tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
       subtotal: "Subtotal", voidShort: " (+%d voided)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
-      thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
+      thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net amount", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
       total: "Total", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       loading: "Loading…",
@@ -809,7 +809,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       hintStart: "Tap the start date", hintEnd: "Tap the end date", done: "Done",
       tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
       cTime: "Time", cAmt: "Amount", cMark: "Reply", cOp: "Operator", cNote: "Note",
-      cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net",
+      cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net amount",
       empty: "No records", emptyGroup: "No group data", rev: "REV", foot: "Same ledger as Telegram · read-only",
       histNote: "Archived periods show the day's records; older dates keep the summary only"
     }
