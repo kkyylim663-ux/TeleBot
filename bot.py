@@ -74,6 +74,7 @@ TARGETS_FILE = os.path.join(_data_dir, "broadcast_targets.json")  # 旧版「登
 KNOWN_GROUPS_FILE = os.path.join(_data_dir, "known_groups.json")
 BLOCKED_FILE = os.path.join(_data_dir, "broadcast_blocked.json")
 JOBS_FILE = os.path.join(_data_dir, "broadcast_jobs.json")
+GROUP_TAGS_FILE = os.path.join(_data_dir, "group_tags.json")  # 分组代号白名单（全局一份，所有群共用）
 
 DEFAULT_LEDGER_SETTINGS = {
     "currency": "AUD",
@@ -509,6 +510,59 @@ def create_ledger_entry(chat_id, entry_type, amount, note, operator_id, operator
     entry["voided"] = False
     append_ledger_entry(chat_id, entry)
     return entry
+
+# ---------- 分组代号白名单（全局一份，所有群共用） ----------
+# 用途：操作员回复客户消息时，回复里只有命中这份白名单的代号、或独立数字金额，才会触发合并记账。
+# 没有这份名单，操作员随手回的「OK」「没收到」这类词都会被当成代号，生成错误账单。
+# 手动维护用三个指令：登记分组 G15 G16 ／ 删除分组 G15 ／ 分组列表（正则见下）。
+RE_ADD_GROUP_TAGS = re.compile(r"^(?:登记分组|添加分组|新增分组)\s+(.+)$")
+RE_DEL_GROUP_TAGS = re.compile(r"^(?:删除分组|移除分组)\s+(.+)$")
+RE_LIST_GROUP_TAGS = re.compile(r"^(?:分组列表|查看分组)$")
+
+
+def load_group_tags():
+    return load_json(GROUP_TAGS_FILE, {})
+
+
+def save_group_tags(data):
+    save_json(GROUP_TAGS_FILE, data)
+
+
+def add_group_tag(tag):
+    """登记分组代号进白名单（去重、保留登记顺序）。"""
+    tag = (tag or "").strip()
+    if not tag:
+        return False
+    data = load_group_tags()
+    tags = data.get("tags", [])
+    if tag in tags:
+        return False
+    tags.append(tag)
+    data["tags"] = tags
+    save_group_tags(data)
+    return True
+
+
+def remove_group_tag(tag):
+    """从白名单移除分组代号；本来就没有则返回 False。"""
+    tag = (tag or "").strip()
+    data = load_group_tags()
+    tags = data.get("tags", [])
+    if tag not in tags:
+        return False
+    tags.remove(tag)
+    data["tags"] = tags
+    save_group_tags(data)
+    return True
+
+
+def is_known_group_tag(tok) -> bool:
+    """是否白名单里的分组代号；长得像数字的词永远不算代号。"""
+    tok = (tok or "").strip()
+    if not tok or RE_STANDALONE_NUM.match(tok):
+        return False
+    return tok in load_group_tags().get("tags", [])
+
 
 # ---------- USDT 地址查重 + TRON 钱包信息 ----------
 
@@ -1401,6 +1455,8 @@ async def try_handle_ledger_entry(update: Update, context: ContextTypes.DEFAULT_
         chat_id, entry_type, amount, note, user.id, operator_name,
         tag=tag, extra=extra,
     )
+    if tag:
+        add_group_tag(tag)  # 用过的代号自动进白名单（之后回复该代号即可触发合并记账）
 
     summary_text = build_ledger_summary(chat_id)
     sent = await update.message.reply_text(
@@ -1541,6 +1597,61 @@ async def try_handle_ledger_revoke(update: Update, context: ContextTypes.DEFAULT
 
 async def try_handle_ledger_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
     chat_id = update.effective_chat.id
+
+    # ---------- 分组代号白名单 ----------
+    m = RE_ADD_GROUP_TAGS.match(text)
+    if m:
+        if not is_operator(update.effective_user):
+            await update.message.reply_text("只有管理员/操作员能登记分组")
+            return True
+        ok, dup, bad = [], [], []
+        for t in m.group(1).split():
+            if RE_STANDALONE_NUM.match(t):
+                bad.append(t)
+            elif is_known_group_tag(t):
+                dup.append(t)
+            else:
+                add_group_tag(t)
+                ok.append(t)
+        lines = []
+        if ok:
+            lines.append("✅ 已登记分组：" + " ".join(ok))
+        if dup:
+            lines.append("已在名单里（跳过）：" + " ".join(dup))
+        if bad:
+            lines.append("⚠️ 纯数字不能当分组代号：" + " ".join(bad))
+        lines.append("")
+        lines.append("当前名单：" + (" ".join(load_group_tags().get("tags", [])) or "（空）"))
+        await update.message.reply_text("\n".join(lines))
+        return True
+
+    m = RE_DEL_GROUP_TAGS.match(text)
+    if m:
+        if not is_operator(update.effective_user):
+            await update.message.reply_text("只有管理员/操作员能删除分组")
+            return True
+        gone, miss = [], []
+        for t in m.group(1).split():
+            (gone if remove_group_tag(t) else miss).append(t)
+        lines = []
+        if gone:
+            lines.append("✅ 已删除分组：" + " ".join(gone))
+        if miss:
+            lines.append("名单里没有：" + " ".join(miss))
+        lines.append("")
+        lines.append("当前名单：" + (" ".join(load_group_tags().get("tags", [])) or "（空）"))
+        await update.message.reply_text("\n".join(lines))
+        return True
+
+    if RE_LIST_GROUP_TAGS.match(text):
+        tags = load_group_tags().get("tags", [])
+        await update.message.reply_text(
+            f"🗂 分组代号白名单（全局共用，共 {len(tags)} 个）：\n"
+            + (" ".join(tags) if tags else "（暂无）")
+            + "\n\n用「登记分组 G15」添加、「删除分组 G15」移除；"
+            "回复客户消息时直接打代号（如 G15 200）即可合并记账。"
+        )
+        return True
 
     if RE_CLEAR_LEDGER.match(text):
         if not is_admin(update.effective_user):
@@ -2565,6 +2676,124 @@ migrate_legacy_targets()
 
 # ---------- 回调 ----------
 
+# ==================== 回复客户消息 · 智能拼装记账 ====================
+# 操作员回复客户消息时，代号/金额/备注可以任意分布在客户原文和回复两条消息里，自动拼装成一笔记账。
+# 触发底线：回复里至少命中「白名单分组代号」或「独立数字金额」一项——"OK""没收到"这类词不触发。
+# 必须排在 try_handle_ledger_entry 之前：否则回复「+200」会先被普通记账规则吃掉、丢掉客户备注。
+
+RE_STANDALONE_NUM = re.compile(r"^([+-])?(\d+(?:\.\d+)?)$")  # 整个词就是数字，可带符号；不拆字母数字连写词
+
+
+def extract_amount_tokens(text):
+    """从一段文字里找出所有『独立成词』的数字词，返回 [(符号, 金额字符串, 原始token), ...]"""
+    tokens = text.split()
+    matches = []
+    for tok in tokens:
+        m = RE_STANDALONE_NUM.match(tok)
+        if m:
+            sign = m.group(1) or "+"  # 没写符号默认当作 +（入账）
+            matches.append((sign, m.group(2), tok))
+    return matches
+
+
+def remove_token_once(text, token):
+    """从文字里移除第一个完全匹配的词（按空格分词），返回剩余文字"""
+    tokens = text.split()
+    result = []
+    removed = False
+    for t in tokens:
+        if not removed and t == token:
+            removed = True
+            continue
+        result.append(t)
+    return " ".join(result).strip()
+
+
+def find_known_tag_token(text):
+    """在文字里找第一个命中白名单的代号词（跳过看起来像数字的词）"""
+    for tok in text.split():
+        if RE_STANDALONE_NUM.match(tok):
+            continue
+        if is_known_group_tag(tok):
+            return tok
+    return None
+
+
+async def try_handle_ledger_smart_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """回复客户消息时，代号/金额/备注可以任意分布在客户原文和操作员回复两条消息里，自动拼装成一笔记账。"""
+    if not update.message.reply_to_message:
+        return False
+
+    src = update.message.reply_to_message
+    src_text_raw = src.text or src.caption
+    if not src_text_raw:
+        return False
+
+    src_text = normalize(src_text_raw.strip())
+    reply_text = normalize(text.strip())
+
+    tag = find_known_tag_token(reply_text)
+    reply_amounts = extract_amount_tokens(reply_text)
+
+    # 触发底线：回复里必须至少命中「白名单代号」或「独立数字金额」其中一项，否则当普通回复忽略
+    if not tag and not reply_amounts:
+        return False
+
+    src_amounts = extract_amount_tokens(src_text)
+
+    # 同一条消息里出现不止一个独立数字 → 歧义，不处理
+    if len(src_amounts) > 1 or len(reply_amounts) > 1:
+        return False
+
+    combined_count = len(src_amounts) + len(reply_amounts)
+    # 两边都有金额，或两边都没有金额 → 歧义/无法记账，不处理
+    if combined_count != 1:
+        return False
+
+    if src_amounts:
+        sign, amount_str, amount_token = src_amounts[0]
+        note = remove_token_once(src_text, amount_token)
+    else:
+        sign, amount_str, amount_token = reply_amounts[0]
+        note = src_text  # 客户消息没有数字，整条当备注来源
+
+    if not note:
+        # 客户侧拿不到备注，退而取操作员回复里剔除代号和金额后剩下的文字
+        note = reply_text
+        if tag:
+            note = remove_token_once(note, tag)
+        for _, _, tok in reply_amounts:
+            note = remove_token_once(note, tok)
+
+    amount = float(amount_str)
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    entry_type = "in" if sign == "+" else "out"
+    operator_name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+    extra = {"user_message_id": update.message.message_id}
+    extra.update(extract_reply_target(update))
+    entry = create_ledger_entry(
+        chat_id, entry_type, amount, note, user.id, operator_name,
+        tag=tag, extra=extra,
+    )
+    if tag:
+        add_group_tag(tag)  # 保险起见再登记一次（已存在则不重复）
+
+    summary_text = build_ledger_summary(chat_id)
+    sent = await update.message.reply_text(
+        summary_text, parse_mode="HTML", reply_markup=build_ledger_detail_keyboard(chat_id, user)
+    )
+
+    data_after = load_ledger_entries()
+    for e in data_after.get(str(chat_id), []):
+        if e.get("id") == entry["id"]:
+            e["confirm_message_id"] = sent.message_id
+            break
+    save_ledger_entries(data_after)
+    return True
+
+
 # ==================== 计算器 ====================
 # - 只有整条消息全是「数字 + 运算符 + 括号」时才触发，不会误伤带文字的记账指令（如 KY +50 T）。
 # - 必须排在 try_handle_ledger_entry 之前：否则「3+5」会被「代号 +金额」的记账规则当成代号 3 入账。
@@ -2683,6 +2912,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if await try_handle_ledger_revoke(update, context, text):
+        return
+
+    if await try_handle_ledger_smart_merge(update, context, text):
         return
 
     if await try_handle_calculator(update, context, text):
