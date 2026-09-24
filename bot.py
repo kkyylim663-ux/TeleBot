@@ -3035,7 +3035,7 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
     record = {
         "chat_id": str(chat_id),
         "chat_title": getattr(chat, "title", "") or "",
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": datetime.now(get_ledger_tz(chat_id)).strftime("%Y-%m-%d %H:%M:%S"),
         "file_unique_id": file_unique_id,
         "file_id": file_id,
         "fingerprint": fingerprint,
