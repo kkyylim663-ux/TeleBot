@@ -3064,12 +3064,7 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
 
     prev_where = "本群" if prev.get("chat_id") == str(chat_id) \
         else f"群「{prev.get('chat_title') or prev.get('chat_id')}」"
-    text = (
-        "⚠️ 发现重复截图\n"
-        f"原因：{reason}\n"
-        f"上次：{prev.get('time', '')} · {prev_where}\n"
-        f"{_fmt_ocr_brief(prev.get('extracted') or {})}"
-    )
+    text = "⚠️ 发现重复截图"
     try:
         await update.message.reply_text(text)  # 引用原截图回复——全流程唯一出声点
     except Exception:
