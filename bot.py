@@ -2738,6 +2738,16 @@ def _console_entry_view(e):
     }
 
 
+def _console_period_time(view, label):
+    """明细「时间」列按账期显示：日期 = 该笔所属的账期（与 Bot 账单卡片的账期一致），
+    时刻 = 记账当时的群时区真实时间。账期换天了，不管真实日期是什么都跟着卡片上的跑；
+    日切后在新账期里记的账，即使真实日期还没翻篇，也归在新账期日期下显示。"""
+    t = view.get("time", "")
+    if label and len(t) >= 11:
+        view["time"] = f"{label} {t[11:]}"
+    return view
+
+
 def _console_group_rows(entries):
     """按分组代号汇总成「分组」表：每个代号一行。
     总入金额 = 该代号 +记一笔 的原始金额合计；
@@ -2794,22 +2804,25 @@ def _console_period_view(chat_id, period, start=None, end=None):
         tout = round(day.get("total_out_amount", 0.0), 4)
         cur = day.get("currency", settings["currency"])
         grand = round(day.get("settlement", 0.0), 4)
-        # 明细批次来自日切归档（明细归档功能上线前的旧日期没有归档明细，只有汇总）
-        batch = list(load_global_entries_archive().get(str(chat_id), {}).get(period, []))
-        if start:
-            batch = [e for e in batch if e.get("time", "") >= start]
-        if end:
-            batch = [e for e in batch if e.get("time", "") <= end]
-        batch.sort(key=lambda x: x.get("time", ""))
-        if batch:
+        # 明细批次来自日切归档（明细归档功能上线前的旧日期没有归档明细，只有汇总）；
+        # 选定账期就是整批统计，时间列显示该账期 + 记账当时的真实时刻，排序按真实时间
+        views = []
+        for e in load_global_entries_archive().get(str(chat_id), {}).get(period, []):
+            v = _console_entry_view(e)
+            v["_sort"] = e.get("time", "")
+            views.append(_console_period_time(v, period))
+        views.sort(key=lambda v: v.get("_sort", ""))
+        for v in views:
+            v.pop("_sort", None)
+        if views:
             return {
                 "period": period, "current": False,
                 "currency": cur,
                 "totals": [{"currency": cur, "in": tin, "out": -tout,
                             "carried": None, "grand": grand}],
-                "entries": [_console_entry_view(e) for e in batch],
-                "groups": _console_group_rows(batch),
-                "count": len(batch),
+                "entries": views,
+                "groups": _console_group_rows(views),
+                "count": len(views),
                 "note": "历史账期明细来自日切归档",
             }
         return {
@@ -2826,22 +2839,35 @@ def _console_period_view(chat_id, period, start=None, end=None):
         }
 
     ps = get_period_start_str(chat_id, tz)
-    entries = [e for e in load_ledger_entries().get(str(chat_id), []) if e.get("time", "") >= ps]
+    # 时间列跟卡片账期跑：实时记录转视图、按当前账期标注日期；真实时间留作排序键
+    rows = []
+    for e in load_ledger_entries().get(str(chat_id), []):
+        if e.get("time", "") < ps:
+            continue
+        v = _console_entry_view(e)
+        v["_sort"] = e.get("time", "")
+        rows.append(_console_period_time(v, label))
     if start or end:
-        # 日历查询可能覆盖历史账期：把明细归档里的批次并入池子再筛选。
-        # 日切后实时账本已清明细，历史批次只存在归档里，两边天然不重叠，不会重复计数。
-        for old_batch in load_global_entries_archive().get(str(chat_id), {}).values():
-            entries.extend(old_batch)
+        # 日历选的是「账期日期」：归档里各批次的记录按各自账期标注日期后并入，
+        # 再按「账期化的显示时间」筛选（每个账期日 = 00:00:00–23:59:59 整天窗口）。
+        # 批次与实时账本天然不重叠（日切即清空）；重新校准重开同一账期时旧批次+新记录一起显示。
+        for L, old_batch in load_global_entries_archive().get(str(chat_id), {}).items():
+            for e in old_batch:
+                v = _console_entry_view(e)
+                v["_sort"] = e.get("time", "")
+                rows.append(_console_period_time(v, L))
     if start:
-        entries = [e for e in entries if e.get("time", "") >= start]
+        rows = [v for v in rows if v.get("time", "") >= start]
     if end:
-        entries = [e for e in entries if e.get("time", "") <= end]
-    entries.sort(key=lambda x: x.get("time", ""))
+        rows = [v for v in rows if v.get("time", "") <= end]
+    rows.sort(key=lambda v: v.get("_sort", ""))
+    for v in rows:
+        v.pop("_sort", None)
 
     # 汇总与三张表同源：都对上面这份筛选结果求和（不筛选时与 Telegram 账单卡片口径完全一致）
     deposit_totals = {}
     disburse_totals = {}
-    for e in entries:
+    for e in rows:
         if e.get("voided"):
             continue
         c = e.get("currency", settings["currency"])
@@ -2872,9 +2898,9 @@ def _console_period_view(chat_id, period, start=None, end=None):
         "period_start": ps,
         "currency": settings["currency"],
         "totals": totals,
-        "entries": [_console_entry_view(e) for e in entries],
-        "groups": _console_group_rows(entries),
-        "count": len(entries),
+        "entries": rows,
+        "groups": _console_group_rows(rows),
+        "count": len(rows),
         "note": "",
     }
 
