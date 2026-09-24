@@ -792,7 +792,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       cTime: "时间", cAmt: "金额", cMark: "标记", cOp: "操作人", cNote: "备注",
       cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账",
       empty: "暂无记录", emptyGroup: "暂无分组数据", rev: "冲正", foot: "网页与 Telegram 共用同一份账本 · 只读查阅",
-      histNote: "历史账期只有当日汇总（日切时明细已清空）"
+      histNote: "历史账期明细来自日切归档（更早的日期只有汇总）"
     },
     en: {
       title: "Bill Details", subtitle: "账单明细", sum: "Total",
@@ -810,7 +810,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       cTime: "Time", cAmt: "Amount", cMark: "Reply", cOp: "Operator", cNote: "Note",
       cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net",
       empty: "No records", emptyGroup: "No group data", rev: "REV", foot: "Same ledger as Telegram · read-only",
-      histNote: "Archived periods keep the daily summary only"
+      histNote: "Archived periods show the day's records; older dates keep the summary only"
     }
   };
   var LANG = localStorage.getItem("ledger_lang") || "zh";
