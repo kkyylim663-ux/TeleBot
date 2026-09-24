@@ -601,6 +601,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .tot-grid b{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
   .tot-grid b.in{color:var(--in)} .tot-grid b.out{color:var(--out)}
   .empty{padding:16px 8px 18px;color:var(--muted);font-size:13px;text-align:center}
+  /* 空状态/加载中的整行占位（colspan 单元格）强制居中：大组没数据时「暂无记录」也要居中 */
+  tbody td[colspan]{text-align:center}
   .banner{background:#fdecec;color:#b3261e;border-radius:12px;padding:12px 14px;margin-top:12px;
           font-size:13.5px;line-height:1.5}
   html[data-theme="dark"] .banner{background:#2a1a1c}
@@ -1447,23 +1449,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
     SESSION = s;
     return load();
   }).then(function (v) {
-    // 默认：开始 = 当前账期起点，结束 = 今天（若账期标签是未来日期，取较晚者）
-    if (v.current && v.period_start && !R.startDate && !R.endDate) {
-      R.startDate = v.period_start.slice(0, 10);
-      R.startTime = v.period_start.slice(11, 16);
-      $("tStart").value = R.startTime;
-      var now = new Date();
-      var pad = function (x) { return ("0" + x).slice(-2); };
-      var endDate = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
-      if (v.period && v.period > endDate) endDate = v.period;
-      R.endDate = endDate;
-      R.endTime = "23:59";
-      $("tEnd").value = "23:59";
-      renderRange();
-      load().catch(function (e) { banner(e.message); });      // 带默认区间再拉一次
-    } else {
-      renderRange();
-    }
+    // 进入页面不预填任何日期区间：默认直接展示当前账期（与 Bot 卡片一致）；
+    // 时间可选输入保持默认 00:00 – 23:59（11:59:59PM），用户点了日历才生效筛选
+    renderRange();
   }).catch(function (e) { banner(e.message); });
 })();
 </script>
