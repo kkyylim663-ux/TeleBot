@@ -2954,7 +2954,7 @@ def save_ocr_bills(data):
 
 _OCR_LOCK = asyncio.Lock()       # OCR 推理串行：防并发时内存叠加
 _OCR_MAX_RECORDS = 3000          # 查重库上限，超出丢最旧记录
-_OCR_ALERT_COOLDOWN = 120        # 同一指纹 120 秒内只报一次警，防连环重发刷屏
+_OCR_ALERT_COOLDOWN = 30         # 同一指纹 30 秒内只报一次警，防连环重发刷屏
 _OCR_ALERT_SEEN = {}             # fingerprint -> 上次报警 time.time()
 
 
