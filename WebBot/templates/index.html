@@ -7,61 +7,37 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="app-header">
-    <div class="header-main">
-      <button id="filterToggle" type="button" class="filter-toggle-icon" aria-expanded="true" aria-controls="filterPanel" aria-label="收起筛选" title="收起筛选">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
-      </button>
-      <div class="brand-copy">
-        <div class="kicker">WebBot Ledger</div>
-        <div class="title-row">
-          <h1>网页账单</h1>
-          <div id="ledgerTabsSlot" class="header-tabs-slot" aria-live="polite"></div>
-        </div>
-      </div>
+  <header>
+    <div class="brand">📒 WebBot 网页账单</div>
+    <div class="group-line">
+      群组：<select id="groupSelect"></select>
+      <span id="periodInfo" class="muted"></span>
     </div>
-    <div class="header-tools">
-      <p id="syncStatus" class="sync-status" role="status" aria-live="polite">正在加载账单…</p>
-      <button id="refreshBtn" type="button" class="error-retry" hidden>重试</button>
-    </div>
+    <div class="tip">💡 「当前账单」下拉可切换历史账单（历史为当日汇总）· 手机版请横屏查看</div>
   </header>
-  <section id="filterPanel" class="filter-panel" aria-label="账单筛选">
-    <div class="header-actions">
-      <div class="header-panel">
-        <label class="header-field group-picker">
-          <span>群组</span>
-          <select id="groupSelect"></select>
-        </label>
-        <span class="date-wrap header-field date-field">
-          <label><span>日期</span><input type="text" id="dateRange" class="date-range" readonly placeholder="选择日期范围" aria-expanded="false" aria-controls="calendar" aria-describedby="dateHelp"></label>
-          <span id="dateHelp" class="sr-only">按回车打开日历。依次选择开始和结束日期，单日可连续选择同一天。</span>
-          <div id="calendar" class="calendar hidden" role="group" aria-label="选择日期范围"></div>
-        </span>
-        <div id="timeField" class="header-field time-field">
-          <span>时间</span>
-          <div class="time-range-controls">
-            <label><span class="sr-only">开始时间</span><input type="time" id="timeStart" value="00:00" aria-label="开始时间"></label>
-            <span aria-hidden="true">—</span>
-            <label><span class="sr-only">结束时间</span><input type="time" id="timeEnd" value="23:59" aria-label="结束时间"></label>
-          </div>
-        </div>
-        <label class="header-field compact-field"><span>操作人</span><select id="operatorSelect"><option value="">全部</option></select></label>
-        <label class="header-field note-field"><span>备注</span><input type="text" id="noteFilter" placeholder="关键字筛选"></label>
-      </div>
+
+  <section class="controls">
+    <div class="row">
+      <span class="date-wrap">
+        <label>Date Range <input type="text" id="dateRange" class="date-range" readonly placeholder="点选开始日期"></label>
+        <div id="calendar" class="calendar hidden"></div>
+      </span>
+      <label><input type="checkbox" id="allTime"> 全部时间</label>
+    </div>
+    <div class="row">
+      <label>操作人 <select id="operatorSelect"><option value="">全部</option></select></label>
+      <label>备注 <input type="text" id="noteFilter" placeholder="关键字筛选"></label>
+    </div>
+    <div class="row center">
+      <select id="billSelect"></select>
+      <button id="viewBtn" class="btn primary">查看账单</button>
+      <button id="exportBtn" class="btn primary">导出xlsx</button>
     </div>
   </section>
 
-  <div class="legacy-actions" aria-hidden="true">
-    <span id="periodInfo"></span>
-    <input type="checkbox" id="allTime">
-    <select id="billSelect"></select>
-    <button id="viewBtn" type="button">查看账单</button>
-    <button id="exportBtn" type="button">导出xlsx</button>
-  </div>
+  <main id="content"><p class="empty">正在加载数据...</p></main>
 
-  <main id="content" aria-busy="true"><p class="empty">正在加载账单…</p></main>
-
-  <footer class="footer"><span class="readonly-label">只读账单</span><p>记账请在 Telegram Bot 中操作<br>页面加载时获取最新数据</p></footer>
+  <footer class="tip footer">WebBot 只读查看 · 记账请在 Telegram bot 里操作 · 数据实时读取 bot 数据文件</footer>
 
   <script src="/static/vendor/xlsx.full.min.js"></script>
   <script>
