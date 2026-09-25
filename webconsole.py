@@ -451,9 +451,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
      白天 Warm Caramel & Ivory —— 象牙白底 + 焦糖暖金，温润长时间阅读
      夜间 Deep Midnight       —— 极夜冷海蓝 + 高对比电光色，防眩光
      文本色均实测对比度 ≥4.5:1（小字标准），个别在色卡基础上同色系微调以满足标准 */
-  :root{ --bg:#FFF8F5; --card:#FFFFFF; --thead:#FBF2ED; --stripe:#FBF2ED; --chip:#F7EFE9;
-         --ink:#261E1A; --muted:#786C65; --line:#F0E6DE;
-         --in:#15803D; --in-fill:#16A34A; --in-bg:#E5F3EC;
+  :root{ --bg:#FFF8F5; --card:#FFFFFF; --thead:#F2E9E2; --stripe:#F6F0EA; --chip:#F7EFE9;
+         --ink:#261E1A; --muted:#726659; --line:#F0E6DE;
+         --in:#14783A; --in-fill:#16A34A; --in-bg:#E5F3EC;
          --out:#C81E1E; --out-fill:#DC2626; --out-bg:#F7E4E1;
          --disb:#C81E1E; --disb-fill:#DC2626; --disb-bg:#F5E4E1;
          --brand:#9F5830; --brand-fill:#B86B3D; --brand-bg:#F7E8DC;
@@ -575,12 +575,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chead .sum{margin-left:auto;font-size:13.5px;font-weight:700}
   .chead .sum.in{color:var(--in)} .chead .sum.out{color:var(--out)} .chead .sum.disb{color:var(--disb)}
   .chead .sum.neg{color:var(--out)}
-  .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
-  table{width:100%;border-collapse:collapse;font-size:13.5px;border:1px solid var(--grid)}
-  /* Excel 那样：每个单元格都有横竖格线 + 表格外框 */
-  th,td{padding:10px 8px;text-align:left;white-space:nowrap;border:1px solid var(--grid)}
+  /* 表格横向铺满卡片（表头底色/斑马条要贴到卡片左右边，跟设计稿一致）；
+     内距只能靠负外边距抵消卡片的左右内距，不能再给自己加 padding，否则整张表会被缩进 */
+  .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px}
+  /* 轻表格（设计稿）：表头一条底色 + 每行下方一条细线；没有竖线、没有表格外框 */
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{padding:10px 8px;text-align:left;white-space:nowrap}
   th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
-     letter-spacing:.02em}
+     letter-spacing:.02em;border-top:1px solid var(--grid);border-bottom:1px solid var(--grid)}
+  tbody td{border-bottom:1px solid var(--grid)}
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
   .r{text-align:center}
@@ -683,10 +686,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .pdf-doc .doc-sec{break-after:avoid;page-break-after:avoid}
     .pdf-doc thead{display:table-header-group}
   }
-  /* 手机端：收紧单元格内距与字号（含格线宽度），保证不出现横向滚动 */
+  /* 手机端：收紧单元格内距与字号，保证不出现横向滚动 */
   @media (max-width:420px){
     .bar h1{font-size:18px}
     .card{padding:12px 8px 4px}
+    .tw{margin:0 -8px}          /* 卡片内距收成 8，负外边距跟着收，表头色带才不会越出卡片 */
     th,td{padding:9px 3px;font-size:12.5px}
     th{font-size:11.5px}
     .note{max-width:84px}
