@@ -484,14 +484,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
           position:relative;
           /* 刘海屏/状态栏安全区：Telegram 内嵌浏览器里顶栏不被系统栏压住 */
           padding:calc(10px + env(safe-area-inset-top)) 12px 10px}
-  .back{flex:0 0 auto;width:44px;height:44px;border:0;background:none;color:var(--ink);
-        font-size:26px;line-height:1;cursor:pointer;display:grid;place-items:center;border-radius:12px}
-  .back:active{background:var(--chip)}
   /* 标题按内容占宽（可缩），币种紧跟标题右边，语言/昼夜钉最右 */
   .ttl{flex:0 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
   .bar h1{margin:0;font-size:19px;font-weight:680;letter-spacing:.2px;
           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .bar .sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tools{margin-left:auto;display:flex;align-items:center;gap:6px;flex:0 0 auto}
   /* 昼夜开关：设计稿里的分段胶囊（点亮的那个是实心圆） */
   .pill.icon{width:44px;padding:0;font-size:17px}
@@ -511,13 +507,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
                       padding:0 12px;border-radius:10px;cursor:pointer;text-align:left;white-space:nowrap}
   .export-menu button:hover{background:var(--chip)}
   /* 币种胶囊：白天焦糖底高亮，夜间冰蓝微光底 */
-  /* 币种胶囊：白天焦糖底高亮（深一档以保证白字达标），夜间冰蓝微光底 */
-  .cur-badge{flex:0 0 auto;min-height:32px;display:inline-flex;align-items:center;
-             border:1px solid transparent;background:var(--brand);color:#fff;
-             border-radius:99px;padding:0 13px;font:inherit;font-size:12.5px}
-  html[data-theme="dark"] .cur-badge{background:rgba(56,189,248,.14);color:var(--brand);
-             border-color:rgba(56,189,248,.34)}
-  .cur-badge b{font-weight:700;letter-spacing:.6px}
 
 /* ---------- 第一排：日期区间（一个控件，一点进去选）；第二排：时间（可选） ---------- */
     .range{background:var(--card);border-radius:16px;margin-top:12px;padding:13px 12px;
@@ -670,12 +659,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <div id="pdfDoc" class="pdf-doc" aria-hidden="true"></div>
 <header class="bar">
   <div class="bar-in">
-    <button class="back" id="backBtn" type="button" aria-label="返回">‹</button>
     <div class="ttl">
       <h1 id="hTitle">账单明细</h1>
-      <span class="sub" id="subTitle">Bill Details</span>
     </div>
-    <span class="cur-badge" id="curBadge" role="status" aria-label="本群币种"><b id="curCode">—</b></span>
     <div class="tools">
       <button class="pill" id="langBtn" type="button" aria-label="切换语言">EN</button>
       <button class="pill icon" id="themeBtn" type="button" aria-label="夜间模式">🌙</button>
@@ -803,7 +789,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   var I18N = {
     zh: {
-      title: "账单明细", subtitle: "Bill Details", sum: "总计",
+      title: "账单明细", sum: "总计",
       toDark: "切换到夜间模式", toLight: "切换到白天模式", export: "导出", exportedAt: "导出时间",
       exportPdf: "导出 PDF", exportXlsx: "导出 Excel", tIn: "入账", tOut: "下发", tGroup: "分组",
       subtotal: "小计", voidShort: "（另有 %d 笔已撤销）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
@@ -822,7 +808,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       histNote: "历史账期明细来自日切归档（更早的日期只有汇总）"
     },
     en: {
-      title: "Bill Details", subtitle: "账单明细", sum: "Total",
+      title: "Bill Details", sum: "Total",
       toDark: "Switch to dark mode", toLight: "Switch to light mode", export: "Export", exportedAt: "Exported",
       exportPdf: "Export PDF", exportXlsx: "Export Excel", tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
       subtotal: "Subtotal", voidShort: " (+%d voided)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
@@ -889,7 +875,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     document.documentElement.lang = LANG === "en" ? "en" : "zh-CN";
     document.title = t("title").replace(/^📒\s*/, "");
     $("hTitle").textContent = t("title");
-    $("subTitle").textContent = t("subtitle");
     $("lblTime").textContent = t("timeOpt");
     $("lblGrand").textContent = t("total");
     $("lblGIn").textContent = t("gIn");
@@ -997,7 +982,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var extra = { period: "", start: b.start, end: b.end };
     return get("/api/ledger", extra).then(function (v) {
       VIEW = v;
-      renderCurrency();
       renderRange();
       renderTables();
       return v;
@@ -1324,9 +1308,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   function voidHint(n) {
     return n ? t("voidShort").replace("%d", n) : "";
   }
-  function renderCurrency() {
-    $("curCode").textContent = (VIEW && VIEW.currency) || "—";
-  }
   /* ---------- 三张表 ---------- */
   function amountCell(e) {
     var n = e.type === "disburse" ? e.net_amount
@@ -1410,7 +1391,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     localStorage.setItem("ledger_theme", THEME);
     applyTheme();
   });
-  $("backBtn").addEventListener("click", function () { history.back(); });
   $("exportBtn").addEventListener("click", function (e) {
     e.stopPropagation();
     openExportMenu();
