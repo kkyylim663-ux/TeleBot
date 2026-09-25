@@ -780,7 +780,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…"
              role="combobox" aria-expanded="false" aria-controls="qList">
       <button class="clr-btn small" id="qClear" type="button" hidden aria-label="清除搜索">✕</button>
-      <button class="clr-btn small q-caret" id="qCaret" type="button" hidden aria-label="展开操作人列表">▾</button>
+      <button class="clr-btn small q-caret" id="qCaret" type="button" aria-label="展开候选列表">▾</button>
     </div>
     <div class="q-list" id="qList" role="listbox" aria-label="操作人" hidden></div>
     <div class="chips" id="scopeChips">
@@ -878,7 +878,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "总计", totalSub: "全期汇总", gIn: "总入账", gOut: "总下发", gGrand: "总金额",
       searchPh: "搜索金额 / 标记 / 操作人 / 备注…", scopeAll: "全部", scopeAmount: "金额",
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
-      opPh: "搜索或选择操作人…", noOperator: "没有匹配的操作人", opList: "展开操作人列表",
+      listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
@@ -901,7 +901,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "Total", totalSub: "Period summary", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       searchPh: "Search amount / reply / operator / note…", scopeAll: "All", scopeAmount: "Amount",
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
-      opPh: "Search or pick an operator…", noOperator: "No matching operator", opList: "Show operator list",
+      listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
@@ -995,8 +995,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("expXlsx").textContent = "📊 " + t("exportXlsx");
     if (typeof applyTheme === "function") applyTheme();
     $("langBtn").textContent = LANG === "zh" ? "EN" : "中文";
-    $("qCaret").setAttribute("aria-label", t("opList"));
-    $("qList").setAttribute("aria-label", t("opList"));
+    $("qCaret").setAttribute("aria-label", t("listLabel"));
     renderQ();                       // 占位字/下拉箭头/下拉里的话术都跟着语言与筛选范围走
     if (QL_ON) renderQList();
     if (VIEW) renderTables();
@@ -1486,12 +1485,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* ---------- 三张表 ---------- */
   /* ---------- 搜索 / 筛选：只筛「入账 / 下发」显示的行，所有汇总照旧 ---------- */
   var Q = { text: "", scope: "all" };
+  var SCOPE_KEY = { all: "scopeAll", amount: "scopeAmount", mark: "scopeMark",
+                    operator: "scopeOperator", note: "scopeNote" };
   function qNorm(s) { return String(s == null ? "" : s).toLowerCase(); }
+  // 金额列显示用的带符号文本：搜索和候选列表都用它，保证「看到的」就能「选到」
+  function amtTxt(e) {
+    return fsig(e.type === "disburse" ? e.net_amount
+                : (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount)));
+  }
   function qMatch(e) {
     if (!Q.text) return true;
     var q = qNorm(Q.text);
-    var amountTxt = fsig(e.type === "disburse" ? e.net_amount
-                        : (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount)));
+    var amountTxt = amtTxt(e);
     var fields = {
       amount: amountTxt + " " + fnum(Math.abs(e.amount || 0)) + " " + fnum(Math.abs(e.net_amount || 0)),
       mark: e.reply_user_name || "",
@@ -1503,10 +1508,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
            qNorm(fields.operator).indexOf(q) >= 0 || qNorm(fields.note).indexOf(q) >= 0;
   }
   function renderQ() {
-    var isOp = Q.scope === "operator";
     $("qClear").hidden = !Q.text;
-    $("qCaret").hidden = !isOp;                       // 只有「操作人」才有下拉
-    $("qInput").setAttribute("placeholder", isOp ? t("opPh") : t("searchPh"));
+    $("qInput").setAttribute("placeholder", Q.scope === "all" ? t("searchPh")
+                              : t("listPh").replace("%s", t(SCOPE_KEY[Q.scope])));
+    $("qList").setAttribute("aria-label", t(SCOPE_KEY[Q.scope]));
     document.querySelectorAll("#scopeChips button").forEach(function (b) {
       var on = b.dataset.scope === Q.scope;
       b.classList.toggle("on", on);
@@ -1514,54 +1519,60 @@ PAGE_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  /* ---------- 「操作人」下拉：列出当前日期区间出现过的操作人（带笔数），可打字过滤 ---------- */
+  /* ---------- 候选下拉：范围选哪一列，就列哪一列在当前日期区间里的取值（带笔数），可打字过滤 ---------- */
   var QL_ON = false;
-  function opNames() {
+  function listValues() {
     if (!VIEW) return [];
     var m = {};
+    var bump = function (v) {
+      v = (v == null ? "" : String(v)).trim();
+      if (v && v !== "—") m[v] = (m[v] || 0) + 1;
+    };
     (VIEW.entries || []).forEach(function (e) {
-      var n = (e.operator_name || "").trim();
-      if (n) m[n] = (m[n] || 0) + 1;
+      if (Q.scope === "all" || Q.scope === "amount") bump(amtTxt(e));
+      if (Q.scope === "all" || Q.scope === "mark") bump(e.reply_user_name);
+      if (Q.scope === "all" || Q.scope === "operator") bump(e.operator_name);
+      if (Q.scope === "all" || Q.scope === "note") bump(e.note);
     });
     return Object.keys(m).sort(function (a, b) { return m[b] - m[a] || (a < b ? -1 : 1); })
-                 .map(function (n) { return { name: n, count: m[n] }; });
+                 .map(function (v) { return { name: v, count: m[v] }; });
   }
   function placeQList() {
     var el = $("qList"), r = $("qInput").getBoundingClientRect();
+    var c = $("scopeChips").getBoundingClientRect();
     el.style.left = Math.round(r.left) + "px";
     el.style.width = Math.round(r.width) + "px";
     var h = el.offsetHeight;
-    // 下面放不下就翻到输入框上方，别被手机键盘遮住
-    if (window.innerHeight - r.bottom - 8 < Math.min(h, 200) && r.top - 8 > Math.min(h, 200)) {
+    // 挂在 chips 下面：列表打开时还能继续点 chips 换范围；下方不够就翻到输入框上方（手机键盘）
+    if (window.innerHeight - c.bottom - 8 < Math.min(h, 200) && r.top - 8 > Math.min(h, 200)) {
       el.style.top = Math.round(r.top - 6 - h) + "px";
     } else {
-      el.style.top = Math.round(r.bottom + 6) + "px";
+      el.style.top = Math.round(c.bottom + 8) + "px";
     }
   }
   function renderQList() {
     if (!QL_ON) { $("qList").hidden = true; $("qInput").setAttribute("aria-expanded", "false"); return; }
     var q = qNorm(Q.text);
-    var hit = opNames().filter(function (o) { return !q || qNorm(o.name).indexOf(q) >= 0; });
+    var hit = listValues().filter(function (o) { return !q || qNorm(o.name).indexOf(q) >= 0; });
     $("qList").innerHTML = hit.length ? hit.map(function (o) {
       var on = qNorm(o.name) === q;
       return '<button type="button" role="option" data-name="' + esc(o.name) + '" aria-selected="' +
              (on ? "true" : "false") + '"' + (on ? ' class="on"' : "") + '><span class="nm">' +
              esc(o.name) + '</span><span class="cnt">' + o.count +
              (LANG === "zh" ? " 笔" : "") + "</span></button>";
-    }).join("") : '<div class="none">' + esc(t("noOperator")) + "</div>";
+    }).join("") : '<div class="none">' + esc(t("noValue")) + "</div>";
     $("qList").hidden = false;
     $("qInput").setAttribute("aria-expanded", "true");
     placeQList();
   }
   function openQList() {
-    if (Q.scope !== "operator") return;
     QL_ON = true; renderQList();
   }
   function closeQList() {
     if (!QL_ON) return;
     QL_ON = false; renderQList();
   }
-  function pickOperator(name) {
+  function pickValue(name) {
     Q.text = name;
     $("qInput").value = name;
     renderQ(); renderTables();
@@ -1700,7 +1711,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var b = e.target.closest("button[data-name]");
     if (!b) return;
     closeQList();
-    pickOperator(b.dataset.name);
+    pickValue(b.dataset.name);
   });
   document.addEventListener("click", function (e) {
     if (!QL_ON) return;
@@ -1719,8 +1730,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (!b) return;
     Q.scope = b.dataset.scope;
     renderQ();
-    // 切到「操作人」就把下拉顶出来（点一下 chip 即可选人，不用先打字）
-    if (Q.scope === "operator") { $("qInput").focus(); openQList(); } else { closeQList(); }
+    // 换范围就把候选列表按新范围重列（点一下 chip 即可选值，不用先打字）
+    $("qInput").focus(); openQList();
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
