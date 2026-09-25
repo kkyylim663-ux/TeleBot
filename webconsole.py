@@ -566,7 +566,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
         overflow:hidden}   /* 表格色带/细线按卡片圆角裁切，圆角外不露直角 */
   .chead{display:flex;align-items:center;gap:9px;margin-bottom:10px;padding:0 2px}
   .badge{flex:0 0 auto;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;
-         font-size:14px;line-height:1;color:#fff}
+         color:#fff}
+  .badge svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;
+             stroke-linecap:round;stroke-linejoin:round}
     .badge.b-in{background:var(--in-fill)}   .badge.b-out{background:var(--disb-fill)}   .badge.b-group{background:#55688A}
   html[data-theme="dark"] .badge.b-group{background:var(--brand)}
     .badge.b-tot{background:var(--brand-fill)}
@@ -816,7 +818,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   <section class="card t-in">
     <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
-      <span class="badge b-in" aria-hidden="true">↓</span>
+      <span class="badge b-in" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4.6v9"/><path d="M8.2 10.4 12 14.2l3.8-3.8"/><path d="M5.4 17.6h13.2"/></svg></span>
       <h2 id="ttlIn">入账</h2><span class="cnt" id="cntIn"></span>
       <span class="sum in" id="sumIn">总计 0</span>
       <span class="fold" aria-hidden="true">▾</span>
@@ -835,7 +837,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   <section class="card t-out">
     <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
-      <span class="badge b-out" aria-hidden="true">⇩</span>
+      <span class="badge b-out" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 19.4v-9"/><path d="M8.2 13.6 12 9.8l3.8 3.8"/><path d="M5.4 6.4h13.2"/></svg></span>
       <h2 id="ttlOut">下发</h2><span class="cnt" id="cntOut"></span>
       <span class="sum disb" id="sumOut">总计 0</span>
       <span class="fold" aria-hidden="true">▾</span>
@@ -854,7 +856,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   <section class="card t-group">
     <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
-      <span class="badge b-group" aria-hidden="true">▦</span>
+      <span class="badge b-group" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4.2" y="4.2" width="6.6" height="6.6" rx="2"/><rect x="13.2" y="4.2" width="6.6" height="6.6" rx="2"/><rect x="4.2" y="13.2" width="6.6" height="6.6" rx="2"/><rect x="13.2" y="13.2" width="6.6" height="6.6" rx="2"/></svg></span>
       <h2 id="ttlGroup">分组</h2><span class="cnt" id="cntGroup"></span>
       <span class="sum" id="sumGroup">总计 0</span>
       <span class="fold" aria-hidden="true">▾</span>
@@ -873,7 +875,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   <section class="card">
     <div class="chead foldable chead-tot" role="button" tabindex="0" aria-expanded="true">
-      <span class="badge b-tot" aria-hidden="true">▤</span>
+      <span class="badge b-tot" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M17.2 5.2H7.2l5.6 6.8-5.6 6.8h10"/></svg></span>
       <h2 id="lblGrand">总计</h2><span class="cnt" id="lblGrandSub">全期汇总</span>
       <span class="fold" aria-hidden="true">▾</span>
     </div>
