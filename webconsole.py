@@ -620,13 +620,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
   html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.16);color:var(--brand);
                                            border-color:rgba(56,189,248,.34)}
 
-  /* 面板里的「开始/结束时刻」 */
+  /* 面板里的「开始/结束时刻」：整块可点，点哪儿都弹出时间选择器（只有一圈边框） */
   .pk-times{display:flex;gap:10px;margin-top:10px}
-  .pk-times label{flex:1 1 0;min-width:0;display:flex;align-items:center;gap:8px;font-size:12.5px;
-                  color:var(--muted);background:var(--card);border:1px solid var(--card-border);
-                  border-radius:11px;padding:8px 10px}
-  .pk-times input{flex:1 1 auto;min-width:0;border:1px solid var(--card-border);background:var(--card);
-                  color:var(--ink);border-radius:9px;font:inherit;font-size:13px;padding:8px 9px;outline:none}
+  .pk-times label{flex:1 1 0;min-width:0;display:flex;align-items:center;gap:7px;font-size:12.5px;
+                  color:var(--muted);background:var(--chip);border:1px solid var(--card-border);
+                  border-radius:12px;padding:0 11px;min-height:46px;cursor:pointer;
+                  transition:border-color .15s}
+  .pk-times label:focus-within{border-color:var(--brand)}
+  .pk-times input{flex:1 1 auto;min-width:0;border:0;background:none;color:var(--ink);font:inherit;
+                  font-size:13.5px;font-weight:700;font-variant-numeric:tabular-nums;
+                  padding:12px 0;outline:none;cursor:pointer}
+  /* 藏掉浏览器自带的时钟按钮：它只有小小一块能点，整块可点靠下面的 JS + 自绘图标 */
+  .pk-times input::-webkit-calendar-picker-indicator{display:none}
+  .pk-times .tico{flex:0 0 auto;width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;
+                  stroke-linecap:round;color:var(--muted);pointer-events:none}
 
   /* ---------- 底部汇总：三行（标签左、金额右） ---------- */
   .tot-rows{margin:2px 0 10px}
@@ -740,8 +747,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div class="grab"></div>
       <div class="pk-head"><b id="pkTitle">选择日期</b><button class="pk-x" id="pkClose" type="button" aria-label="关闭">✕</button></div>
     <div class="pk-times">
-      <label><span id="lblTimeStart">开始</span><input type="time" id="tStart" value="00:00"></label>
-      <label><span id="lblTimeEnd">结束</span><input type="time" id="tEnd" value="23:59"></label>
+      <label><span id="lblTimeStart">开始</span><input type="time" id="tStart" value="00:00"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></label>
+      <label><span id="lblTimeEnd">结束</span><input type="time" id="tEnd" value="23:59"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></label>
     </div>
       <div class="cal-head">
         <button class="mv" id="calPrev" type="button" aria-label="上个月">‹</button>
@@ -1642,6 +1649,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
   $("tEnd").addEventListener("change", function () {
     R.endTime = this.value || "23:59";
     debouncedLoad();
+  });
+  /* 时刻整块可点：点标签、时间文字或时钟图标任意位置都弹出时间选择器
+     （浏览器自带的时钟按钮只有一小块能点，已用 CSS 藏掉，改由整块区域触发） */
+  document.querySelectorAll(".pk-times label").forEach(function (lb) {
+    var inp = lb.querySelector("input");
+    lb.addEventListener("click", function (e) {
+      if (e.target !== inp) e.preventDefault();   // 否则 label 会把这次点击再转给 input，弹两次
+      try { inp.showPicker(); } catch (err) { inp.focus(); }
+    });
   });
 
   /* ---------- 启动 ---------- */
