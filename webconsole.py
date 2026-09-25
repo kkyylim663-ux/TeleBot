@@ -575,6 +575,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chead .sum{margin-left:auto;font-size:13.5px;font-weight:700}
   .chead .sum.in{color:var(--in)} .chead .sum.out{color:var(--out)} .chead .sum.disb{color:var(--disb)}
   .chead .sum.neg{color:var(--out)}
+  /* 卡头可点＝收起/展开这张表：卡头本身已带笔数与总计，收起来不丢关键信息 */
+  .chead.foldable{cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  .chead.foldable:active .fold{color:var(--ink)}
+  .chead.foldable:focus-visible{outline:2px solid var(--brand);outline-offset:3px;border-radius:10px}
+  .fold{flex:0 0 auto;width:18px;height:18px;margin-left:2px;display:grid;place-items:center;
+        font-size:11px;line-height:1;color:var(--muted);transition:transform .18s,color .15s}
+  .chead-tot .fold{margin-left:auto}          /* 「总计」卡头没有右侧数字，箭头自己顶到最右 */
+  .card.folded .fold{transform:rotate(-90deg)}
+  .card.folded > *{display:none}              /* 收起＝只留卡头 */
+  .card.folded > .chead{display:flex}
   /* 表格横向铺满卡片（表头底色/斑马条要贴到卡片左右边，跟设计稿一致）；
      自身不能留内距，否则整张表会被缩进；底部再吃掉卡片那 4px 内距，让表格收到卡片底边，
      由卡片圆角来收口（设计稿就是这样，不会有「细线 + 白边 + 卡片边框」三层） */
@@ -791,10 +801,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card t-in">
-    <div class="chead">
+    <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
       <span class="badge b-in" aria-hidden="true">↓</span>
       <h2 id="ttlIn">入账</h2><span class="cnt" id="cntIn"></span>
       <span class="sum in" id="sumIn">总计 0</span>
+      <span class="fold" aria-hidden="true">▾</span>
     </div>
     <div class="tw">
       <table>
@@ -809,10 +820,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card t-out">
-    <div class="chead">
+    <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
       <span class="badge b-out" aria-hidden="true">⇩</span>
       <h2 id="ttlOut">下发</h2><span class="cnt" id="cntOut"></span>
       <span class="sum disb" id="sumOut">总计 0</span>
+      <span class="fold" aria-hidden="true">▾</span>
     </div>
     <div class="tw">
       <table>
@@ -827,10 +839,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card t-group">
-    <div class="chead">
+    <div class="chead foldable" role="button" tabindex="0" aria-expanded="true">
       <span class="badge b-group" aria-hidden="true">▦</span>
       <h2 id="ttlGroup">分组</h2><span class="cnt" id="cntGroup"></span>
       <span class="sum" id="sumGroup">总计 0</span>
+      <span class="fold" aria-hidden="true">▾</span>
     </div>
     <div class="tw">
       <table>
@@ -845,9 +858,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </section>
 
   <section class="card">
-    <div class="chead">
+    <div class="chead foldable chead-tot" role="button" tabindex="0" aria-expanded="true">
       <span class="badge b-tot" aria-hidden="true">▤</span>
       <h2 id="lblGrand">总计</h2><span class="cnt" id="lblGrandSub">全期汇总</span>
+      <span class="fold" aria-hidden="true">▾</span>
     </div>
     <div class="tot-rows">
       <div><i id="lblGIn">总入账</i><b id="gIn">0</b></div>
@@ -877,6 +891,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       searchPh: "搜索金额 / 标记 / 操作人 / 备注…", scopeAll: "全部", scopeAmount: "金额",
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
       listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
+      foldHint: "点击收起 / 展开这张表",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
@@ -900,6 +915,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       searchPh: "Search amount / reply / operator / note…", scopeAll: "All", scopeAmount: "Amount",
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
       listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
+      foldHint: "Tap to collapse / expand",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
@@ -987,6 +1003,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
     ].forEach(function (p) { $(p[0]).textContent = t(p[1]); });
     if (!VIEW) setLoading();
     $("footTip").textContent = t("foot");
+    document.querySelectorAll(".chead.foldable").forEach(function (h) {
+      h.setAttribute("title", t("foldHint"));      // 鼠标悬停提示：点击收起 / 展开
+    });
     $("exportBtn").setAttribute("aria-label", t("export"));
     $("exportBtn").setAttribute("title", t("export"));
     $("expPdf").textContent = "📄 " + t("exportPdf");
@@ -1471,6 +1490,34 @@ PAGE_HTML = r"""<!DOCTYPE html>
     document.querySelectorAll(".tw").forEach(function (el) { el.setAttribute("aria-busy", "true"); });
   }
   /* ---------- 三张表 ---------- */
+  /* ---------- 卡片收起 / 展开：状态记在 localStorage，刷新后还记得 ---------- */
+  var FOLD_KEY = "ledger_folded";
+  var folded = {};
+  try { folded = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") || {}; } catch (err) { folded = {}; }
+  function setFold(card, key, on, save) {
+    card.classList.toggle("folded", on);
+    var h = card.querySelector(".chead");
+    if (h) h.setAttribute("aria-expanded", on ? "false" : "true");
+    if (save) {
+      folded[key] = on;
+      try { localStorage.setItem(FOLD_KEY, JSON.stringify(folded)); } catch (err) {}
+    }
+  }
+  function initFold() {
+    document.querySelectorAll(".card > .chead.foldable").forEach(function (h) {
+      var card = h.parentElement;
+      var ttl = h.querySelector("h2");
+      var key = ttl ? ttl.id : "";
+      if (!key) return;
+      setFold(card, key, !!folded[key], false);          // 恢复上次的收起状态
+      var toggle = function () { setFold(card, key, !card.classList.contains("folded"), true); };
+      h.addEventListener("click", toggle);
+      h.addEventListener("keydown", function (e) {      // 键盘也要能用
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    });
+  }
+
   /* ---------- 搜索 / 筛选：只筛「入账 / 下发」显示的行，所有汇总照旧 ---------- */
   var Q = { text: "", scope: "all" };
   var SCOPE_KEY = { all: "scopeAll", amount: "scopeAmount", mark: "scopeMark",
@@ -1765,6 +1812,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   applyTheme();
   applyLang();
   renderQ();
+  initFold();
   if (!ID || !T) {
     banner(LANG === "zh" ? "链接缺少签名参数，请从 Telegram 里的「📋 账单明细」按钮重新进入"
                          : "Missing signature. Re-open from the Telegram 「📋 账单明细」 button.");
