@@ -1843,10 +1843,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var b = e.target.closest("button[data-scope]");
     if (!b) return;
     // 再点一次已选中的 chip = 取消该范围，回到「所有列一起搜」（此时没有 chip 高亮）
-    Q.scope = (Q.scope === b.dataset.scope) ? "all" : b.dataset.scope;
+    var wasOn = (Q.scope === b.dataset.scope);
+    Q.scope = wasOn ? "all" : b.dataset.scope;
     renderQ();
-    // 点 chip 就把候选下拉直接展开（不用再去点搜索框）；不聚焦输入框，避免手机上先弹出键盘
-    openQList();
+    // 选中某个范围＝顺势把候选下拉展开（一步到位，不用再点搜索框）；
+    // 取消范围＝只收起下拉，别再自动弹出来。不聚焦输入框，避免手机上先弹键盘。
+    if (wasOn) { closeQList(); } else { openQList(); }
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
