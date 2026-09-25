@@ -638,7 +638,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .search-row input:focus{border-color:var(--brand)}
   .clr-btn.small{width:44px;height:44px;background:var(--chip)}
   /* 「操作人」下拉：固定定位浮在搜索框下方，可搜索、点一项即筛 */
-  .q-caret{font-size:13px;color:var(--muted)}
   .q-list[hidden]{display:none}
   .q-list{position:fixed;z-index:30;background:var(--card);border:1px solid var(--card-border);
           border-radius:12px;box-shadow:0 12px 30px -12px rgba(13,21,32,.45);
@@ -651,21 +650,22 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .q-list button .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .q-list button .cnt{flex:0 0 auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .q-list .none{padding:12px 10px;font-size:13px;color:var(--muted)}
-  /* 搜索范围 chips：浅底药丸，选中的填焦糖色并带一点浮起感；悬停/按下都有反馈 */
-  .chips{display:flex;gap:7px;overflow-x:auto;padding:1px 0 2px;scrollbar-width:none}
+  /* 搜索范围 chips：细一圈的浅描边药丸（未选中＝描边+灰字，选中才填焦糖色），主次分明；
+     未选中时是「可加的筛选项」，选中时是「正在生效筛的那一列」 */
+  .chips{display:flex;gap:8px;overflow-x:auto;padding:1px 0 2px;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
-  .chips button{flex:0 0 auto;border:1px solid transparent;background:var(--chip);color:var(--ink);
-                border-radius:999px;font:inherit;font-size:12.5px;font-weight:650;letter-spacing:.01em;
-                padding:9px 15px;min-height:38px;cursor:pointer;white-space:nowrap;
-                transition:background .15s,color .15s,box-shadow .15s,transform .12s}
-  .chips button:hover{background:var(--brand-bg);color:var(--brand)}
+  .chips button{flex:0 0 auto;border:1px solid var(--card-border);background:transparent;color:var(--muted);
+                border-radius:999px;font:inherit;font-size:12.5px;font-weight:600;letter-spacing:.01em;
+                padding:7px 13px;min-height:34px;cursor:pointer;white-space:nowrap;
+                transition:background .15s,border-color .15s,color .15s,transform .12s}
+  .chips button:hover{border-color:var(--brand);color:var(--brand)}
   .chips button:active{transform:scale(.96)}
-  .chips button.on{background:var(--brand);color:#fff;box-shadow:0 3px 10px -4px rgba(159,88,48,.75)}
-  .chips button.on:hover{background:var(--brand);color:#fff}
-  html[data-theme="dark"] .chips button{background:var(--chip);color:var(--ink)}
-  html[data-theme="dark"] .chips button:hover{background:rgba(56,189,248,.14);color:var(--brand)}
-  html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.18);color:var(--brand);
-                                           box-shadow:0 0 0 1px rgba(56,189,248,.42) inset}
+  .chips button.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:700}
+  .chips button.on:hover{background:var(--brand);border-color:var(--brand);color:#fff}
+  html[data-theme="dark"] .chips button{border-color:var(--line);color:var(--muted)}
+  html[data-theme="dark"] .chips button:hover{border-color:var(--brand);color:var(--brand)}
+  html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.18);border-color:rgba(56,189,248,.42);
+                                           color:var(--brand)}
 
   /* 面板里的「开始/结束时刻」：整块可点，点开自绘的时刻面板（24 小时制） */
   .pk-times{display:flex;gap:10px;margin-top:10px}
@@ -848,7 +848,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
                role="combobox" aria-expanded="false" aria-controls="qList">
       </span>
       <button class="clr-btn small" id="qClear" type="button" hidden aria-label="清除搜索">✕</button>
-      <button class="clr-btn small q-caret" id="qCaret" type="button" aria-label="展开候选列表">▾</button>
     </div>
     <div class="q-list" id="qList" role="listbox" aria-label="操作人" hidden></div>
   </section>
@@ -944,7 +943,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "总计", totalSub: "全期汇总", gIn: "总入账", gOut: "总下发", gGrand: "总金额",
       searchPh: "搜索金额 / 标记 / 操作人 / 备注…", scopeAll: "全部", scopeAmount: "金额",
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
-      listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
+      listPh: "搜索或选择%s…", noValue: "没有匹配的选项",
       foldHint: "点击收起 / 展开这张表",
       tpHour: "时", tpMin: "分",
       pullDown: "下拉刷新", pullRelease: "松手刷新", pullBusy: "刷新中…",
@@ -969,7 +968,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "Total", totalSub: "Period summary", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       searchPh: "Search amount / reply / operator / note…", scopeAll: "All", scopeAmount: "Amount",
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
-      listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
+      listPh: "Search or pick %s…", noValue: "No matching option",
       foldHint: "Tap to collapse / expand",
       tpHour: "Hour", tpMin: "Min",
       pullDown: "Pull to refresh", pullRelease: "Release to refresh", pullBusy: "Refreshing…",
@@ -1070,7 +1069,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("expXlsx").textContent = "📊 " + t("exportXlsx");
     if (typeof applyTheme === "function") applyTheme();
     $("langBtn").textContent = LANG === "zh" ? "EN" : "中文";
-    $("qCaret").setAttribute("aria-label", t("listLabel"));
     renderQ();                       // 占位字/下拉箭头/下拉里的话术都跟着语言与筛选范围走
     if (QL_ON) renderQList();
     if (VIEW) renderTables();
@@ -1805,9 +1803,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   $("qInput").addEventListener("focus", openQList);
   $("qInput").addEventListener("click", openQList);   // 已经聚焦时再点也要把下拉顶出来
   $("qInput").addEventListener("keydown", function (e) { if (e.key === "Escape") closeQList(); });
-  $("qCaret").addEventListener("click", function () {
-    if (QL_ON) { closeQList(); } else { $("qInput").focus(); openQList(); }
-  });
   $("qList").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-name]");
     if (!b) return;
