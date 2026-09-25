@@ -630,6 +630,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .clr-btn.small{width:44px;height:44px;background:var(--chip)}
   /* 「操作人」下拉：固定定位浮在搜索框下方，可搜索、点一项即筛 */
   .q-caret{font-size:13px;color:var(--muted)}
+  .q-list[hidden]{display:none}
   .q-list{position:fixed;z-index:30;background:var(--card);border:1px solid var(--card-border);
           border-radius:12px;box-shadow:0 12px 30px -12px rgba(13,21,32,.45);
           max-height:min(280px,50vh);overflow:auto;padding:6px;
@@ -663,6 +664,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
                   stroke-linecap:round;color:var(--muted);pointer-events:none}
   /* 时刻下拉：贴着时刻字段弹出的小面板（时 / 分两列滚动），不是弹窗 */
   .pk-times .tfield.on{border-color:var(--brand)}
+  .tpop[hidden]{display:none}          /* 兜底：作者样式的 display 会压过 [hidden] 的默认值 */
   .tpop{position:fixed;z-index:30;display:flex;gap:6px;padding:6px;
         background:var(--card);border:1px solid var(--card-border);border-radius:12px;
         box-shadow:0 12px 30px -12px rgba(13,21,32,.45)}
@@ -1114,7 +1116,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
     renderCal();
     $("mask").classList.add("on"); $("picker").classList.add("on");
   }
-  function closePicker() { $("mask").classList.remove("on"); $("picker").classList.remove("on"); }
+  function closePicker() {
+    $("mask").classList.remove("on");
+    $("picker").classList.remove("on");
+    closeTP();          // 面板收起时，贴在字段上的时刻下拉也一起收，别留在页面上
+  }
   function pickDay(s) {
     if (R.active === "start") {
       R.startDate = s;
@@ -1805,6 +1811,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   document.addEventListener("pointerdown", outsideClose);   // 触摸端 click 可能被吞，按下去就判
   document.addEventListener("click", outsideClose);
   window.addEventListener("scroll", closeQList, { passive: true });
+  window.addEventListener("scroll", function (e) {
+    var n = e.target;
+    if (n && n.nodeType === 1 && n.closest && n.closest("#tpop")) return;   // 滚下拉自己的列表不算
+    closeTP();                                            // 页面或日期面板一滚，下拉的位置就不准了，收起
+  }, true);
   window.addEventListener("resize", function () { if (QL_ON) placeQList(); });
   $("qClear").addEventListener("click", function () {
     Q.text = ""; $("qInput").value = "";
