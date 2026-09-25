@@ -605,7 +605,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   tbody tr:last-child td{border-bottom:0}   /* 最后一行不划线，收口交给卡片底边 */
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
-  .r{text-align:center;white-space:normal}   /* 数字列放开换行：宁可折行也不把金额截断成「-1,2…」 */
+  /* 全表左对齐：三张表的列名与内容都从各自的列左边缘起排，跨表也整齐；
+     数字列只额外放开换行（宁可折行也不把金额截断成「-1,2…」） */
+  .amtn{white-space:normal}
   .amt{font-weight:640}
   .amt.in{color:var(--in)} .amt.out{color:var(--out)} .amt.disb{color:var(--disb)}
   .suf{font-size:11px;color:var(--muted);font-weight:400;margin-left:5px}
@@ -822,7 +824,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="tw">
       <table>
         <thead><tr>
-          <th scope="col" id="thTime1">时间</th><th scope="col" class="r" id="thAmt1">金额</th>
+          <th scope="col" id="thTime1">时间</th><th scope="col" id="thAmt1">金额</th>
           <th scope="col" id="thMark1">标记</th>
           <th scope="col" id="thOp1">操作人</th><th scope="col" id="thNote1">备注</th>
         </tr></thead>
@@ -841,7 +843,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="tw">
       <table>
         <thead><tr>
-          <th scope="col" id="thTime2">时间</th><th scope="col" class="r" id="thAmt2">金额</th>
+          <th scope="col" id="thTime2">时间</th><th scope="col" id="thAmt2">金额</th>
           <th scope="col" id="thMark2">标记</th>
           <th scope="col" id="thOp2">操作人</th><th scope="col" id="thNote2">备注</th>
         </tr></thead>
@@ -861,8 +863,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <table>
         <thead><tr>
           <th scope="col" id="thTime3">时间</th><th scope="col" id="thTag3">代号</th>
-          <th scope="col" class="r" id="thIn3">总入金额</th><th scope="col" class="r" id="thOut3">总出金额</th>
-          <th scope="col" class="r" id="thGrand3">总账</th>
+          <th scope="col" id="thIn3">总入金额</th><th scope="col" id="thOut3">总出金额</th>
+          <th scope="col" id="thGrand3">总账</th>
         </tr></thead>
         <tbody id="tbGroup"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
       </table>
@@ -1641,7 +1643,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       : '<span class="mark blank">—</span>';
     return "<tr>" +
       '<td class="num">' + esc(shortTime(e.time)) + "</td>" +
-      '<td class="r">' + amountCell(e) + "</td>" +
+      '<td class="amtn">' + amountCell(e) + "</td>" +
       "<td>" + mark + "</td>" +
       "<td>" + esc(e.operator_name || "—") + "</td>" +
       '<td class="note">' + esc(e.note || "—") + "</td></tr>";
@@ -1687,9 +1689,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
       return "<tr>" +
         '<td class="num">' + esc(shortTime(g.time)) + "</td>" +
         '<td><span class="code">' + esc(g.tag || "—") + "</span></td>" +
-        '<td class="r"><span class="amt in num">' + fnum(g.in_total) + "</span></td>" +
-        '<td class="r"><span class="amt out num">' + fnum(g.out_total) + "</span></td>" +
-        '<td class="r"><span class="amt num ' + (g.grand >= 0 ? "in" : "out") + '">' + fsig(g.grand) + "</span></td></tr>";
+        '<td class="amtn"><span class="amt in num">' + fnum(g.in_total) + "</span></td>" +
+        '<td class="amtn"><span class="amt out num">' + fnum(g.out_total) + "</span></td>" +
+        '<td class="amtn"><span class="amt num ' + (g.grand >= 0 ? "in" : "out") + '">' + fsig(g.grand) + "</span></td></tr>";
     }).join("") : '<tr><td colspan="5" class="empty">' + esc(t("emptyGroup")) + "</td></tr>";
     sGrp.textContent = t("sum") + " " + fsig(sumGrp);
     sGrp.className = "sum " + (sumGrp >= 0 ? "in" : "neg");
