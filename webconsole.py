@@ -540,7 +540,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .pk-head b{font-size:15px;font-weight:650}
   .pk-x{border:0;background:var(--chip);width:44px;height:44px;border-radius:50%;color:var(--muted);
         font-size:16px;cursor:pointer;display:grid;place-items:center}
-  .pk-hint{margin-top:6px;font-size:12px;color:var(--brand)}
   .cal-head{display:flex;align-items:center;justify-content:space-between;margin:12px 0 6px}
   .cal-head .mv{border:0;background:var(--chip);color:var(--ink);width:44px;height:44px;border-radius:11px;
                 font-size:18px;cursor:pointer;display:grid;place-items:center}
@@ -620,15 +619,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chips button.on{background:var(--brand);border-color:transparent;color:#fff;font-weight:700}
   html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.16);color:var(--brand);
                                            border-color:rgba(56,189,248,.34)}
-
-  /* 面板里的「开始 / 结束」选择行：点哪端就编辑哪端 */
-  .pk-picks{display:flex;gap:8px;margin-top:10px}
-  .pk-picks button{flex:1 1 0;min-width:0;display:flex;align-items:baseline;gap:8px;
-                   border:1px solid var(--card-border);background:var(--card);color:var(--ink);
-                   border-radius:11px;padding:9px 11px;font:inherit;cursor:pointer;text-align:left}
-  .pk-picks button.on{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand) inset}
-  .pk-picks i{font-style:normal;font-size:12px;color:var(--muted);flex:0 0 auto}
-  .pk-picks b{font-size:13.5px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* 面板里的「开始/结束时刻」 */
   .pk-times{display:flex;gap:10px;margin-top:10px}
@@ -749,15 +739,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     <div class="picker-wrap">
       <div class="grab"></div>
       <div class="pk-head"><b id="pkTitle">选择日期</b><button class="pk-x" id="pkClose" type="button" aria-label="关闭">✕</button></div>
-      <div class="pk-hint" id="pkHint"></div>
-      <div class="pk-picks" id="pkPicks">
-        <button type="button" class="on" data-end="start">
-          <i id="lblPickStart">开始</i><b id="pkStartVal">—</b>
-        </button>
-        <button type="button" data-end="end">
-          <i id="lblPickEnd">结束</i><b id="pkEndVal">—</b>
-        </button>
-      </div>
     <div class="pk-times">
       <label><span id="lblTimeStart">开始</span><input type="time" id="tStart" value="00:00"></label>
       <label><span id="lblTimeEnd">结束</span><input type="time" id="tEnd" value="23:59"></label>
@@ -877,7 +858,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
-      hintStart: "正在选开始日期 · 点上方可切换", hintEnd: "正在选结束日期 · 点上方可切换", done: "完成",
+      done: "完成",
       tIn: "入账", tOut: "下发", tGroup: "分组",
       cTime: "时间", cAmt: "金额", cMark: "标记", cOp: "操作人", cNote: "备注",
       cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账金额",
@@ -899,7 +880,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
-      hintStart: "Picking start date · tap above to switch", hintEnd: "Picking end date · tap above to switch", done: "Done",
+      done: "Done",
       tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
       cTime: "Time", cAmt: "Amount", cMark: "Reply", cOp: "Operator", cNote: "Note",
       cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net amount",
@@ -959,8 +940,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("qInput").setAttribute("placeholder", t("searchPh"));
     $("qClear").setAttribute("aria-label", t("clearSearch"));
     $("clrDate").setAttribute("aria-label", t("clearDate"));
-    $("lblPickStart").textContent = t("timeStart");
-    $("lblPickEnd").textContent = t("timeEnd");
     $("lblTimeStart").textContent = t("timeStart");
     $("lblTimeEnd").textContent = t("timeEnd");
     [["scopeAll", "all"], ["scopeAmount", "amount"], ["scopeMark", "mark"],
@@ -1042,7 +1021,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       html += '<button class="' + cls.trim() + '" data-date="' + s + '">' + d.getDate() + "</button>";
     }
     $("calDays").innerHTML = html;
-    $("pkHint").textContent = R.active === "start" ? t("hintStart") : t("hintEnd");
   }
   function openPicker() {
     if (VIEW && !VIEW.current) { banner(t("histNote")); return; }
@@ -1050,7 +1028,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var ref = R.endDate || R.startDate;
     if (ref) { R.calY = +ref.slice(0, 4); R.calM = +ref.slice(5, 7); }
     else { var n = new Date(); R.calY = n.getFullYear(); R.calM = n.getMonth() + 1; }
-    renderPicks(); renderCal();
+    renderCal();
     $("mask").classList.add("on"); $("picker").classList.add("on");
   }
   function closePicker() { $("mask").classList.remove("on"); $("picker").classList.remove("on"); }
@@ -1059,11 +1037,13 @@ PAGE_HTML = r"""<!DOCTYPE html>
       R.startDate = s;
       if (R.endDate && R.endDate < s) R.endDate = s;
       R.active = "end";                       // 第一下=开始，第二下=结束
+    } else if (s === R.endDate && R.startDate && R.startDate !== R.endDate) {
+      R.startDate = R.endDate = s;            // 再点一次已选中的结束日 = 只看这一天
     } else {
       R.endDate = s;
-      if (R.startDate && R.startDate > s) R.startDate = s;
+      if (R.startDate && R.startDate > s) R.startDate = s;   // 点了开始日之前的日子，同样收成单日
     }
-    renderPicks(); renderRange(); renderCal(); debouncedLoad();
+    renderRange(); renderCal(); debouncedLoad();
   }
 
   function load() {
@@ -1493,13 +1473,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     return qNorm(amountTxt).indexOf(q) >= 0 || qNorm(fields.mark).indexOf(q) >= 0 ||
            qNorm(fields.operator).indexOf(q) >= 0 || qNorm(fields.note).indexOf(q) >= 0;
   }
-  function renderPicks() {
-    $("pkStartVal").textContent = R.startDate || "—";
-    $("pkEndVal").textContent = R.endDate || "—";
-    document.querySelectorAll("#pkPicks button").forEach(function (b) {
-      b.classList.toggle("on", b.dataset.end === R.active);
-    });
-  }
   function renderQ() {
     $("qClear").hidden = !Q.text;
     document.querySelectorAll("#scopeChips button").forEach(function (b) {
@@ -1646,14 +1619,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   $("pkClose").addEventListener("click", closePicker);
   $("pkDone").addEventListener("click", closePicker);
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") closePicker(); });
-  $("pkPicks").addEventListener("click", function (e) {
-    var b = e.target.closest("button[data-end]");
-    if (!b) return;
-    R.active = b.dataset.end;
-    var ref = (R.active === "start" ? R.startDate : R.endDate) || R.startDate || R.endDate;
-    if (ref) { R.calY = +ref.slice(0, 4); R.calM = +ref.slice(5, 7); }
-    renderPicks(); renderCal();
-  });
   $("calDays").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-date]");
     if (b) pickDay(b.dataset.date);
@@ -1668,7 +1633,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   });
   $("clrDate").addEventListener("click", function () {
     R.startDate = ""; R.endDate = ""; R.active = "start";   // 清空后重新从「开始」点起
-    renderRange(); renderPicks(); debouncedLoad();
+    renderRange(); debouncedLoad();
   });
   $("tStart").addEventListener("change", function () {
     R.startTime = this.value || "00:00";
