@@ -626,10 +626,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
   /* ---------- 搜索行 + 筛选 chips ---------- */
   .search-row{display:flex;align-items:center;gap:8px}
-  .search-row .ico{flex:0 0 auto;font-size:15px;color:var(--muted)}
-  .search-row input{flex:1 1 auto;min-width:0;border:1px solid var(--card-border);background:var(--chip);
+  /* 放大镜画在输入框里面：绝对定位在左侧，输入文字留出 padding-left */
+  .search-row .q-wrap{position:relative;flex:1 1 auto;min-width:0;display:block}
+  .search-row .q-ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);
+                     width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;
+                     stroke-linecap:round;color:var(--muted);pointer-events:none}
+  .search-row input{width:100%;border:1px solid var(--card-border);background:var(--chip);
                     color:var(--ink);border-radius:12px;font:inherit;font-size:13.5px;
-                    padding:11px 12px;min-height:44px;outline:none}
+                    padding:11px 12px 11px 36px;min-height:44px;outline:none}
   .search-row input::placeholder{color:var(--muted)}
   .search-row input:focus{border-color:var(--brand)}
   .clr-btn.small{width:44px;height:44px;background:var(--chip)}
@@ -832,9 +836,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
   <section class="range">
     <div class="search-row">
-      <span class="ico" aria-hidden="true">🔍</span>
-      <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…"
-             role="combobox" aria-expanded="false" aria-controls="qList">
+      <span class="q-wrap">
+        <svg class="q-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.3"/><path d="M15.5 15.5 20 20"/></svg>
+        <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…"
+               role="combobox" aria-expanded="false" aria-controls="qList">
+      </span>
       <button class="clr-btn small" id="qClear" type="button" hidden aria-label="清除搜索">✕</button>
       <button class="clr-btn small q-caret" id="qCaret" type="button" aria-label="展开候选列表">▾</button>
     </div>
