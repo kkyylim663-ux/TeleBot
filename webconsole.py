@@ -459,7 +459,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
          --brand:#9F5830; --brand-fill:#B86B3D; --brand-bg:#F7E8DC;
          --code:#8A5300; --code-bg:#FDF1DC;
          --card-shadow:0 4px 20px -2px rgba(184,107,61,.06), 0 1px 3px rgba(41,37,34,.03);
-         --card-border:#F0E6DE; }
+         --card-border:#F0E6DE; --grid:#E6D9CE; }
   html[data-theme="dark"]{ --bg:#0B0F19; --card:#131B2E; --thead:#1E293B; --stripe:#1A233A;
          --chip:#1A233A; --ink:#F8FAFC; --muted:#94A3B8; --line:#22304C;
          --in:#34D399; --in-fill:#10B981; --in-bg:#0C2B22;
@@ -468,7 +468,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
          --brand:#38BDF8; --brand-fill:#38BDF8; --brand-bg:#0E2A3A;
          --code:#38BDF8; --code-bg:#0E2A3A;
          --card-shadow:none;
-         --card-border:#22304C; }
+         --card-border:#22304C; --grid:#2C3E5C; }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
        font:15px/1.5 "Plus Jakarta Sans",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",
@@ -576,13 +576,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chead .sum.in{color:var(--in)} .chead .sum.out{color:var(--out)} .chead .sum.disb{color:var(--disb)}
   .chead .sum.neg{color:var(--out)}
   .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
-  table{width:100%;border-collapse:collapse;font-size:13.5px}
-  th,td{padding:11px 8px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;border:1px solid var(--grid)}
+  /* Excel 那样：每个单元格都有横竖格线 + 表格外框 */
+  th,td{padding:10px 8px;text-align:left;white-space:nowrap;border:1px solid var(--grid)}
   th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
      letter-spacing:.02em}
-  thead th:first-child{border-radius:9px 0 0 9px} thead th:last-child{border-radius:0 9px 9px 0}
-  thead th{border-bottom:0}
-  tr:last-child td{border-bottom:0}
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
   .r{text-align:center}
@@ -676,6 +674,20 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .pdf-doc .doc-sec{break-after:avoid;page-break-after:avoid}
     .pdf-doc thead{display:table-header-group}
   }
+  /* 手机端：收紧单元格内距与字号（含格线宽度），保证不出现横向滚动 */
+  @media (max-width:420px){
+    .bar h1{font-size:18px}
+    .card{padding:12px 8px 4px}
+    th,td{padding:9px 3px;font-size:12.5px}
+    th{font-size:11.5px}
+    .note{max-width:84px}
+    .suf{font-size:11px;margin-left:3px}
+  }
+  @media (max-width:379px){
+    th,td{padding:8px 2px}
+    .note{max-width:72px}
+  }
+
 </style>
 </head>
 <body>
