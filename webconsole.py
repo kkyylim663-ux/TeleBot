@@ -490,7 +490,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tools{margin-left:auto;display:flex;align-items:center;gap:6px;flex:0 0 auto}
   /* 昼夜开关：设计稿里的分段胶囊（点亮的那个是实心圆） */
-  .pill.icon{width:44px;padding:0;font-size:17px}
   /* 语言 / 币种胶囊 */
   .pill{min-width:44px;min-height:44px;border:1px solid var(--card-border);background:var(--card);
         color:var(--ink);border-radius:99px;font:inherit;font-size:13px;font-weight:600;
@@ -526,15 +525,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
            display:grid;place-items:center}
   .clr-btn:active{transform:translateY(1px)}
   .clr-btn[hidden]{display:none}
-  .time-row{display:flex;align-items:center;gap:8px;margin-top:11px;font-size:12.5px;color:var(--muted);
-            flex-wrap:wrap}
-  .time-row .lab{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .time-row .lab{flex:0 0 auto}
-  .time-row input{border:1px solid var(--line);background:var(--chip);color:var(--ink);border-radius:11px;
-                  font:inherit;font-size:13px;padding:11px 10px;min-height:44px;outline:none;
-                  flex:1 1 92px;min-width:0}
-  .time-row.off{opacity:.45}
-  .time-row.off input{pointer-events:none}
 
   .mask{position:fixed;inset:0;background:rgba(13,21,32,.42);opacity:0;pointer-events:none;
         transition:.2s;z-index:20}
@@ -606,6 +596,40 @@ PAGE_HTML = r"""<!DOCTYPE html>
         font-size:12.5px;color:var(--code);background:var(--code-bg)}
   .note{max-width:280px;overflow:hidden;text-overflow:ellipsis}
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
+  /* ---------- 搜索行 + 筛选 chips ---------- */
+  .search-row{display:flex;align-items:center;gap:8px}
+  .search-row .ico{flex:0 0 auto;font-size:15px;color:var(--muted)}
+  .search-row input{flex:1 1 auto;min-width:0;border:1px solid var(--card-border);background:var(--chip);
+                    color:var(--ink);border-radius:12px;font:inherit;font-size:13.5px;
+                    padding:11px 12px;min-height:44px;outline:none}
+  .search-row input::placeholder{color:var(--muted)}
+  .search-row input:focus{border-color:var(--brand)}
+  .clr-btn.small{width:44px;height:44px;background:var(--chip)}
+  .chips{display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:1px;scrollbar-width:none}
+  .chips::-webkit-scrollbar{display:none}
+  .chips button{flex:0 0 auto;border:1px solid var(--card-border);background:var(--card);color:var(--muted);
+                border-radius:99px;font:inherit;font-size:12.5px;padding:8px 13px;min-height:36px;
+                cursor:pointer;white-space:nowrap}
+  .chips button.on{background:var(--brand);border-color:transparent;color:#fff;font-weight:700}
+  html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.16);color:var(--brand);
+                                           border-color:rgba(56,189,248,.34)}
+
+  /* 面板里的「开始/结束时刻」 */
+  .pk-times{display:flex;gap:10px;margin-top:10px}
+  .pk-times label{flex:1 1 0;min-width:0;display:flex;align-items:center;gap:8px;font-size:12.5px;
+                  color:var(--muted);background:var(--card);border:1px solid var(--card-border);
+                  border-radius:11px;padding:8px 10px}
+  .pk-times input{flex:1 1 auto;min-width:0;border:1px solid var(--card-border);background:var(--card);
+                  color:var(--ink);border-radius:9px;font:inherit;font-size:13px;padding:8px 9px;outline:none}
+
+  /* ---------- 底部汇总：三行（标签左、金额右） ---------- */
+  .tot-rows{margin:2px 0 10px}
+  .tot-rows>div{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+                padding:12px 2px;border-bottom:1px solid var(--line)}
+  .tot-rows>div:last-child{border-bottom:0}
+  .tot-rows i{font-style:normal;font-size:13px;color:var(--muted)}
+  .tot-rows b{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
+  .tot-rows b.in{color:var(--in)} .tot-rows b.out{color:var(--out)}
   .tot-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:2px 0 10px}
   .tot-grid>div{background:var(--card);border-radius:12px;padding:12px 8px;text-align:center;
                 display:flex;flex-direction:column;gap:4px;min-width:0;
@@ -620,7 +644,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .banner{background:#fdecec;color:#b3261e;border-radius:12px;padding:12px 14px;margin-top:12px;
           font-size:13.5px;line-height:1.5}
   html[data-theme="dark"] .banner{background:#2a1a1c}
-  .print-head{display:none}
   footer{text-align:center;color:var(--muted);font-size:12px;padding:16px 0 4px}
 
 /* ---------- 导出 PDF：只把账单明细清楚地印出来（不做正式报表的花架子） ---------- */
@@ -644,10 +667,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .pdf-doc td{padding:3.5px 5px;border-bottom:1px solid #dddddd;vertical-align:top}
     .pdf-doc tbody tr:nth-child(even) td{background:#f7f7f7}
     .pdf-doc .n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-    .pdf-doc tr.v td{color:#777;text-decoration:line-through}
     .pdf-doc .doc-total{display:flex;gap:22px;align-items:baseline;margin-top:14px;padding:7px 9px;
                         border-top:2px solid #000;border-bottom:2px solid #000;font-size:11.5px}
     .pdf-doc .doc-total b{font-weight:700;margin-right:6px}
+    .pdf-doc .doc-note{margin-top:6px;font-size:9.5px;color:#333}
     .pdf-doc .doc-foot{margin-top:10px;font-size:9px;color:#555}
     .pdf-doc tr{break-inside:avoid;page-break-inside:avoid}
     .pdf-doc .doc-sec{break-after:avoid;page-break-after:avoid}
@@ -687,12 +710,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       </button>
       <button class="clr-btn" id="clrDate" hidden aria-label="清除日期">✕</button>
     </div>
-    <div class="time-row" id="timeRow">
-      <span class="lab" id="lblTime">时间（可选）</span>
-      <input type="time" id="tStart" value="00:00">
-      <span id="lblTo2">至</span>
-      <input type="time" id="tEnd" value="23:59">
-    </div>
   </section>
 
 
@@ -702,6 +719,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div class="grab"></div>
       <div class="pk-head"><b id="pkTitle">选择日期</b><button class="pk-x" id="pkClose" type="button" aria-label="关闭">✕</button></div>
       <div class="pk-hint" id="pkHint"></div>
+    <div class="pk-times">
+      <label><span id="lblTimeStart">开始</span><input type="time" id="tStart" value="00:00"></label>
+      <label><span id="lblTimeEnd">结束</span><input type="time" id="tEnd" value="23:59"></label>
+    </div>
       <div class="cal-head">
         <button class="mv" id="calPrev" type="button" aria-label="上个月">‹</button>
         <b id="calTitle"></b>
@@ -712,6 +733,21 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <button class="pk-done" id="pkDone">完成</button>
     </div>
   </div>
+
+  <section class="range">
+    <div class="search-row">
+      <span class="ico" aria-hidden="true">🔍</span>
+      <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…">
+      <button class="clr-btn small" id="qClear" type="button" hidden aria-label="清除搜索">✕</button>
+    </div>
+    <div class="chips" id="scopeChips">
+      <button type="button" data-scope="all" class="on">全部</button>
+      <button type="button" data-scope="amount">金额</button>
+      <button type="button" data-scope="mark">标记</button>
+      <button type="button" data-scope="operator">操作人</button>
+      <button type="button" data-scope="note">备注</button>
+    </div>
+  </section>
 
   <section class="card t-in">
     <div class="chead">
@@ -772,10 +808,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <span class="badge b-tot" aria-hidden="true">▤</span>
       <h2 id="lblGrand">总计</h2><span class="cnt" id="lblGrandSub">全期汇总</span>
     </div>
-    <div class="tot-grid">
-      <div><i id="lblGIn">总进</i><b class="in" id="gIn">0</b></div>
-      <div><i id="lblGOut">总出</i><b class="out" id="gOut">0</b></div>
-      <div><i id="lblGGrand">总账</i><b id="gGrand">0</b></div>
+    <div class="tot-rows">
+      <div><i id="lblGIn">总入账</i><b id="gIn">0</b></div>
+      <div><i id="lblGOut">总下发</i><b id="gOut">0</b></div>
+      <div><i id="lblGGrand">总金额</i><b id="gGrand">0</b></div>
     </div>
   </section>
 
@@ -796,7 +832,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账金额", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
-      total: "总计", totalSub: "全期汇总", gIn: "总入金额", gOut: "总出金额", gGrand: "总账金额",
+      total: "总计", totalSub: "全期汇总", gIn: "总入账", gOut: "总下发", gGrand: "总金额",
+      searchPh: "搜索金额 / 标记 / 操作人 / 备注…", scopeAll: "全部", scopeAmount: "金额",
+      scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
+      timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
       hintStart: "点一下开始日期", hintEnd: "再点一下结束日期", done: "完成",
@@ -816,6 +855,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net amount", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
       total: "Total", totalSub: "Period summary", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
+      searchPh: "Search amount / reply / operator / note…", scopeAll: "All", scopeAmount: "Amount",
+      scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
+      timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
       hintStart: "Tap the start date", hintEnd: "Tap the end date", done: "Done",
@@ -875,13 +917,21 @@ PAGE_HTML = r"""<!DOCTYPE html>
     document.documentElement.lang = LANG === "en" ? "en" : "zh-CN";
     document.title = t("title").replace(/^📒\s*/, "");
     $("hTitle").textContent = t("title");
-    $("lblTime").textContent = t("timeOpt");
+    $("qInput").setAttribute("placeholder", t("searchPh"));
+    $("qClear").setAttribute("aria-label", t("clearSearch"));
+    $("clrDate").setAttribute("aria-label", t("clearDate"));
+    $("lblTimeStart").textContent = t("timeStart");
+    $("lblTimeEnd").textContent = t("timeEnd");
+    [["scopeAll", "all"], ["scopeAmount", "amount"], ["scopeMark", "mark"],
+     ["scopeOperator", "operator"], ["scopeNote", "note"]].forEach(function (p) {
+      var b = document.querySelector('#scopeChips button[data-scope="' + p[1] + '"]');
+      if (b) b.textContent = t(p[0]);
+    });
     $("lblGrand").textContent = t("total");
     $("lblGIn").textContent = t("gIn");
     $("lblGOut").textContent = t("gOut");
     $("lblGGrand").textContent = t("gGrand");
     $("lblGrandSub").textContent = t("totalSub");
-    $("lblTo2").textContent = t("to");
     $("pkTitle").textContent = t("pickTitle");
     $("pkDone").textContent = t("done");
     if (VIEW) renderRange();
@@ -903,7 +953,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (VIEW) renderTables();
   }
 
-  /* ---------- 第一排：日期区间（一点进去选）；第二排：时间（可选） ---------- */
+  /* ---------- 日期区间：一行显示（含时刻），点进去在面板里选日期与时刻 ---------- */
   var R = { startDate: "", endDate: "", startTime: "00:00", endTime: "23:59",
             active: "start", calY: 0, calM: 0 };
   var MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -919,17 +969,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
     };
   }
   function renderRange() {
-    var txt;
-    if (R.startDate && R.endDate) txt = R.startDate + "   →   " + R.endDate;
-    else if (R.startDate) txt = R.startDate + " 起";
-    else if (R.endDate) txt = "→  " + R.endDate;
+    var txt, sep = "  " + t("to") + "  ";
+    var s = R.startDate ? (R.startDate + " " + R.startTime) : "";
+    var e = R.endDate ? (R.endDate + " " + R.endTime) : "";
+    if (s && e) txt = s + sep + e;
+    else if (s) txt = s + (LANG === "zh" ? " 起" : " →");
+    else if (e) txt = (LANG === "zh" ? "至 " : "→ ") + e;
     else txt = t("pickDate");
     $("dateText").textContent = txt;
     $("clrDate").hidden = !(R.startDate || R.endDate);
-    var noDate = !R.startDate && !R.endDate;
-    $("timeRow").classList.toggle("off", noDate);
-    $("tStart").disabled = noDate;
-    $("tEnd").disabled = noDate;
   }
   function renderCal() {
     var first = new Date(R.calY, R.calM - 1, 1);
@@ -1115,7 +1163,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
                 gs.reduce(function (s, g) { return s + g.out_total; }, 0),
                 gs.reduce(function (s, g) { return s + g.grand; }, 0)]);
 
-    var shTot = [[T("total")], [T("gIn"), sumIns], [T("gOut"), -sumNet],
+    var shTot = [[T("total")], [T("gIn"), sumIns], [T("gOut"), sumNet],
                  [T("gGrand"), sumIns + sumNet]];
     if (SESSION && SESSION.title) shTot.push([]);
     if (SESSION && SESSION.title) shTot.push([SESSION.title]);
@@ -1283,11 +1331,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
     // 底部总计（与页面「总计」卡片一致）
     // 底部总计：总入 = 入账表合计；总出 = 下发表净额（正数）；总账 = 总入 − 总出
-    var outAmount = -sumOut;
-    var netAmount = sumIn - outAmount;
     E.push('<div class="doc-total"><b>' + esc(t("total")) + "</b><span>" + esc(t("gIn")) + " " +
-           esc(fnum(sumIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fnum(outAmount)) + "</span><span>" +
-           esc(t("gGrand")) + " " + esc(fsig(netAmount)) + "</span></div>");
+           esc(fsig(sumIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fsig(sumOut)) +
+           "</span><span>" + esc(t("gGrand")) + " " + esc(fsig(sumIn + sumOut)) + "</span></div>");
     if (voids.length) {
       E.push('<div class="doc-note">' + esc(t("voidShort").replace("%d", voids.length)) + "</div>");
     }
@@ -1297,7 +1343,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     window.print();
   }
 
-  /* ---------- 顶栏币种徽章（只展示，不切换） ---------- */
   /* 首屏/切币种时给出进度反馈：三张表先显示「加载中…」，避免一片空白 */
   function setLoading() {
     ["tbIn", "tbOut", "tbGroup"].forEach(function (id) {
@@ -1309,6 +1354,33 @@ PAGE_HTML = r"""<!DOCTYPE html>
     return n ? t("voidShort").replace("%d", n) : "";
   }
   /* ---------- 三张表 ---------- */
+  /* ---------- 搜索 / 筛选：只筛「入账 / 下发」显示的行，所有汇总照旧 ---------- */
+  var Q = { text: "", scope: "all" };
+  function qNorm(s) { return String(s == null ? "" : s).toLowerCase(); }
+  function qMatch(e) {
+    if (!Q.text) return true;
+    var q = qNorm(Q.text);
+    var amountTxt = fsig(e.type === "disburse" ? e.net_amount
+                        : (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount)));
+    var fields = {
+      amount: amountTxt + " " + fnum(Math.abs(e.amount || 0)) + " " + fnum(Math.abs(e.net_amount || 0)),
+      mark: e.reply_user_name || "",
+      operator: e.operator_name || "",
+      note: e.note || ""
+    };
+    if (Q.scope !== "all") return qNorm(fields[Q.scope] || "").indexOf(q) >= 0;
+    return qNorm(amountTxt).indexOf(q) >= 0 || qNorm(fields.mark).indexOf(q) >= 0 ||
+           qNorm(fields.operator).indexOf(q) >= 0 || qNorm(fields.note).indexOf(q) >= 0;
+  }
+  function renderQ() {
+    $("qClear").hidden = !Q.text;
+    document.querySelectorAll("#scopeChips button").forEach(function (b) {
+      var on = b.dataset.scope === Q.scope;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+
   function amountCell(e) {
     var n = e.type === "disburse" ? e.net_amount
           : (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount));
@@ -1341,12 +1413,17 @@ PAGE_HTML = r"""<!DOCTYPE html>
       if (e.type === "disburse") outs.push(e); else ins.push(e);
     });
     var unit = LANG === "zh" ? "笔" : "";
-    $("cntIn").textContent = ins.length + " " + unit + voidHint(insVoid);
-    $("cntOut").textContent = outs.length + " " + unit + voidHint(outsVoid);
-    $("tbIn").innerHTML = ins.length ? ins.map(row).join("")
-      : '<tr><td colspan="5" class="empty">' + esc(t("empty")) + "</td></tr>";
-    $("tbOut").innerHTML = outs.length ? outs.map(row).join("")
-      : '<tr><td colspan="5" class="empty">' + esc(t("empty")) + "</td></tr>";
+    // 搜索只影响显示的行：计数显示「命中 / 总数」，卡头总计与底部汇总仍是整段区间
+    var insView = ins.filter(qMatch), outsView = outs.filter(qMatch);
+    function cntTxt(hit, total) {
+      return (Q.text && hit !== total ? hit + " / " + total : String(total)) + " " + unit;
+    }
+    $("cntIn").textContent = cntTxt(insView.length, ins.length) + voidHint(insVoid);
+    $("cntOut").textContent = cntTxt(outsView.length, outs.length) + voidHint(outsVoid);
+    $("tbIn").innerHTML = insView.length ? insView.map(row).join("")
+      : '<tr><td colspan="5" class="empty">' + esc(Q.text ? t("noMatch") : t("empty")) + "</td></tr>";
+    $("tbOut").innerHTML = outsView.length ? outsView.map(row).join("")
+      : '<tr><td colspan="5" class="empty">' + esc(Q.text ? t("noMatch") : t("empty")) + "</td></tr>";
 
     // 分组表（各组之和）
     var gs = VIEW.groups || [];
@@ -1373,12 +1450,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
     }).join("") : '<tr><td colspan="5" class="empty">' + esc(t("emptyGroup")) + "</td></tr>";
     sGrp.textContent = t("sum") + " " + fsig(sumGrp);
     sGrp.className = "sum " + (sumGrp >= 0 ? "in" : "neg");
-    // 底部总计：总入金额 = 入账表合计；总出金额 = 下发表净额（取正数）；总账金额 = 总入 − 总出
-    // （入账表本身已含「- 记一笔」，分组只是它们的拆分，所以这里已包含分组）
-    var outAmount = -sumOutTbl;
-    var netAmount = sumInTbl - outAmount;
-    $("gIn").textContent = fnum(sumInTbl);
-    $("gOut").textContent = fnum(outAmount);
+    // 底部汇总三行：总入账 = 入账表合计；总下发 = 下发表净额（负数显示）；总金额 = 两者相加
+    // （入账表本身已含「- 记一笔」，分组只是拆分，所以这个口径已包含分组）
+    var outAmount = sumOutTbl;
+    var netAmount = sumInTbl + outAmount;
+    var gi = $("gIn"), go = $("gOut");
+    gi.textContent = fsig(sumInTbl);
+    gi.className = "num " + (sumInTbl >= 0 ? "in" : "out");
+    go.textContent = fsig(outAmount);
+    go.className = "num " + (outAmount >= 0 ? "in" : "out");
     var gg = $("gGrand");
     gg.textContent = fsig(netAmount);
     gg.className = "num " + (netAmount >= 0 ? "in" : "out");
@@ -1415,6 +1495,24 @@ PAGE_HTML = r"""<!DOCTYPE html>
       load().catch(function (e) { banner(e.message); });
     }, 260);
   }
+  var qTimer = null;
+  $("qInput").addEventListener("input", function () {
+    Q.text = this.value.trim();
+    renderQ();
+    clearTimeout(qTimer);
+    qTimer = setTimeout(renderTables, 180);
+  });
+  $("qClear").addEventListener("click", function () {
+    Q.text = ""; $("qInput").value = "";
+    renderQ(); renderTables();
+  });
+  $("scopeChips").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-scope]");
+    if (!b) return;
+    Q.scope = b.dataset.scope;
+    renderQ();
+    if (Q.text) renderTables();
+  });
   $("dateBtn").addEventListener("click", openPicker);
   $("mask").addEventListener("click", closePicker);
   $("pkClose").addEventListener("click", closePicker);
@@ -1448,6 +1546,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* ---------- 启动 ---------- */
   applyTheme();
   applyLang();
+  renderQ();
   if (!ID || !T) {
     banner(LANG === "zh" ? "链接缺少签名参数，请从 Telegram 里的「📋 账单明细」按钮重新进入"
                          : "Missing signature. Re-open from the Telegram 「📋 账单明细」 button.");
