@@ -563,7 +563,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
 /* ---------- 三张表（设计稿：卡片头 = 色块图标 + 标题 + 笔数 + 右侧总计） ---------- */
     .card{background:var(--card);border-radius:16px;margin-top:12px;padding:12px 12px 4px;
-        border:1px solid var(--card-border);box-shadow:var(--card-shadow)}
+        border:1px solid var(--card-border);box-shadow:var(--card-shadow);
+        overflow:hidden}   /* 表格色带/细线按卡片圆角裁切，圆角外不露直角 */
   .chead{display:flex;align-items:center;gap:9px;margin-bottom:10px;padding:0 2px}
   .badge{flex:0 0 auto;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;
          font-size:14px;line-height:1;color:#fff}
@@ -576,14 +577,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chead .sum.in{color:var(--in)} .chead .sum.out{color:var(--out)} .chead .sum.disb{color:var(--disb)}
   .chead .sum.neg{color:var(--out)}
   /* 表格横向铺满卡片（表头底色/斑马条要贴到卡片左右边，跟设计稿一致）；
-     内距只能靠负外边距抵消卡片的左右内距，不能再给自己加 padding，否则整张表会被缩进 */
-  .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px}
+     自身不能留内距，否则整张表会被缩进；底部再吃掉卡片那 4px 内距，让表格收到卡片底边，
+     由卡片圆角来收口（设计稿就是这样，不会有「细线 + 白边 + 卡片边框」三层） */
+  .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px -4px}
   /* 轻表格（设计稿）：表头一条底色 + 每行下方一条细线；没有竖线、没有表格外框 */
   table{width:100%;border-collapse:collapse;font-size:13.5px}
   th,td{padding:10px 8px;text-align:left;white-space:nowrap}
   th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
      letter-spacing:.02em;border-top:1px solid var(--grid);border-bottom:1px solid var(--grid)}
   tbody td{border-bottom:1px solid var(--grid)}
+  tbody tr:last-child td{border-bottom:0}   /* 最后一行不划线，收口交给卡片底边 */
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
   .r{text-align:center}
@@ -690,7 +693,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   @media (max-width:420px){
     .bar h1{font-size:18px}
     .card{padding:12px 8px 4px}
-    .tw{margin:0 -8px}          /* 卡片内距收成 8，负外边距跟着收，表头色带才不会越出卡片 */
+    .tw{margin:0 -8px -4px}     /* 卡片内距收成 8，负外边距跟着收；底部照样吃掉 4px 收到卡片边 */
     th,td{padding:9px 3px;font-size:12.5px}
     th{font-size:11.5px}
     .note{max-width:84px}
