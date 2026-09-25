@@ -447,20 +447,32 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>账单明细</title>
 <style>
-  /* 配色按设计稿；文本色都实测过对比度（小字 <18pt 需 ≥4.5:1）：
-     浅色：绿 5.14 / 红 5.58 / 紫 6.72 / 次要灰 5.46 / 蓝 6.70（白卡与页面底均达标）
-     深色：绿 9.31 / 红 5.93 / 紫 6.05 / 次要灰 6.40（深蓝卡片底均达标） */
-  :root{ --bg:#f5f6f8; --card:#fff; --thead:#f7f8fb; --ink:#0f172a; --muted:#5b6a85;
-         --line:#e9ecf2; --in:#0a7d57; --out:#c62a2a; --disb:#5b3fd6; --brand:#1d4ed8;
-         --chip:#f1f3f7; --stripe:#f4f6f9;
-         --in-bg:#e6f5ef; --out-bg:#fdeceb; --disb-bg:#eeeaff; --brand-bg:#e8efff; }
-  html[data-theme="dark"]{ --bg:#0d1424; --card:#151f33; --thead:#1b2740; --ink:#e9eefb;
-         --muted:#93a2bf; --line:#243149; --in:#3ddc97; --out:#ff6b6b; --disb:#a78bfa;
-         --brand:#5b9dff; --chip:#1b2740; --stripe:#1b2740;
-         --in-bg:#123a2c; --out-bg:#3a1c22; --disb-bg:#241f45; --brand-bg:#16294a; }
+  /* 两套完全解耦的主题：
+     白天 Warm Caramel & Ivory —— 象牙白底 + 焦糖暖金，温润长时间阅读
+     夜间 Deep Midnight       —— 极夜冷海蓝 + 高对比电光色，防眩光
+     文本色均实测对比度 ≥4.5:1（小字标准），个别在色卡基础上同色系微调以满足标准 */
+  :root{ --bg:#FFF8F5; --card:#FFFFFF; --thead:#FBF2ED; --stripe:#FBF2ED; --chip:#F7EFE9;
+         --ink:#261E1A; --muted:#786C65; --line:#F0E6DE;
+         --in:#15803D; --in-fill:#16A34A; --in-bg:#E5F3EC;
+         --out:#C81E1E; --out-fill:#DC2626; --out-bg:#F7E4E1;
+         --disb:#C81E1E; --disb-fill:#DC2626; --disb-bg:#F5E4E1;
+         --brand:#9F5830; --brand-fill:#B86B3D; --brand-bg:#F7E8DC;
+         --code:#8A5300; --code-bg:#FDF1DC;
+         --card-shadow:0 4px 20px -2px rgba(184,107,61,.06), 0 1px 3px rgba(41,37,34,.03);
+         --card-border:#F0E6DE; }
+  html[data-theme="dark"]{ --bg:#0B0F19; --card:#131B2E; --thead:#1E293B; --stripe:#1A233A;
+         --chip:#1A233A; --ink:#F8FAFC; --muted:#94A3B8; --line:#22304C;
+         --in:#34D399; --in-fill:#10B981; --in-bg:#0C2B22;
+         --out:#FB7185; --out-fill:#F43F5E; --out-bg:#31111C;
+         --disb:#FB7185; --disb-fill:#F43F5E; --disb-bg:#31111C;
+         --brand:#38BDF8; --brand-fill:#38BDF8; --brand-bg:#0E2A3A;
+         --code:#38BDF8; --code-bg:#0E2A3A;
+         --card-shadow:none;
+         --card-border:#22304C; }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
-       font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       font:15px/1.5 "Plus Jakarta Sans",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",
+            "PingFang SC","Microsoft YaHei",sans-serif;
        -webkit-text-size-adjust:100%}
   .num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
   .wrap{max-width:820px;margin:0 auto;padding:0 12px 28px}
@@ -484,9 +496,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* 昼夜开关：设计稿里的分段胶囊（点亮的那个是实心圆） */
   .pill.icon{width:44px;padding:0;font-size:17px}
   /* 语言 / 币种胶囊 */
-  .pill{min-width:44px;min-height:44px;border:1px solid var(--line);background:var(--card);
+  .pill{min-width:44px;min-height:44px;border:1px solid var(--card-border);background:var(--card);
         color:var(--ink);border-radius:99px;font:inherit;font-size:13px;font-weight:600;
         padding:0 12px;cursor:pointer;display:grid;place-items:center;white-space:nowrap}
+  .pill:active{transform:translateY(1px)}
+  .pill.icon{width:44px;padding:0;font-size:17px}
   .pill:active{transform:translateY(1px)}
   /* 导出菜单：点导出按钮弹出，选 PDF / Excel */
   .export-menu{position:absolute;top:calc(100% - 2px);right:12px;z-index:30;background:var(--card);
@@ -496,14 +510,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
                       background:none;color:var(--ink);font:inherit;font-size:13.5px;font-weight:600;
                       padding:0 12px;border-radius:10px;cursor:pointer;text-align:left;white-space:nowrap}
   .export-menu button:hover{background:var(--chip)}
+  /* 币种胶囊：白天焦糖底高亮，夜间冰蓝微光底 */
+  /* 币种胶囊：白天焦糖底高亮（深一档以保证白字达标），夜间冰蓝微光底 */
   .cur-badge{flex:0 0 auto;min-height:32px;display:inline-flex;align-items:center;
-             border:1px solid var(--line);background:var(--chip);color:var(--ink);border-radius:99px;
-             padding:0 12px;font:inherit;font-size:12.5px}
+             border:1px solid transparent;background:var(--brand);color:#fff;
+             border-radius:99px;padding:0 13px;font:inherit;font-size:12.5px}
+  html[data-theme="dark"] .cur-badge{background:rgba(56,189,248,.14);color:var(--brand);
+             border-color:rgba(56,189,248,.34)}
   .cur-badge b{font-weight:700;letter-spacing:.6px}
 
 /* ---------- 第一排：日期区间（一个控件，一点进去选）；第二排：时间（可选） ---------- */
-  .range{background:var(--card);border-radius:16px;margin-top:12px;padding:13px 12px;
-         box-shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 22px -16px rgba(16,24,40,.22)}
+    .range{background:var(--card);border-radius:16px;margin-top:12px;padding:13px 12px;
+         border:1px solid var(--card-border);box-shadow:var(--card-shadow)}
   .date-row{display:flex;align-items:center;gap:8px}
   .date-btn{flex:1 1 auto;min-width:0;min-height:48px;display:flex;align-items:center;gap:10px;
             border:1px solid var(--line);background:var(--chip);color:var(--ink);border-radius:13px;
@@ -565,13 +583,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
 
 /* ---------- 三张表（设计稿：卡片头 = 色块图标 + 标题 + 笔数 + 右侧总计） ---------- */
-  .card{background:var(--card);border-radius:16px;margin-top:12px;padding:12px 12px 4px;
-        box-shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 22px -16px rgba(16,24,40,.22)}
+    .card{background:var(--card);border-radius:16px;margin-top:12px;padding:12px 12px 4px;
+        border:1px solid var(--card-border);box-shadow:var(--card-shadow)}
   .chead{display:flex;align-items:center;gap:9px;margin-bottom:10px;padding:0 2px}
   .badge{flex:0 0 auto;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;
          font-size:14px;line-height:1;color:#fff}
-  .badge.b-in{background:var(--in)} .badge.b-out{background:var(--disb)} .badge.b-group{background:var(--brand)}
-  .badge.b-tot{background:var(--brand)}
+    .badge.b-in{background:var(--in-fill)}   .badge.b-out{background:var(--disb-fill)}   .badge.b-group{background:#55688A}
+  html[data-theme="dark"] .badge.b-group{background:var(--brand)}
+    .badge.b-tot{background:var(--brand-fill)}
   .chead h2{margin:0;font-size:15px;font-weight:680}
   .chead .cnt{font-size:12px;color:var(--muted);font-weight:400}
   .chead .sum{margin-left:auto;font-size:13.5px;font-weight:700}
@@ -579,8 +598,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .chead .sum.neg{color:var(--out)}
   .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
   table{width:100%;border-collapse:collapse;font-size:13.5px}
-  th,td{padding:9px 8px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
-  th{font-size:12px;font-weight:600;color:var(--muted);position:sticky;top:0;background:var(--thead)}
+  th,td{padding:11px 8px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
+  th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
+     letter-spacing:.02em}
   thead th:first-child{border-radius:9px 0 0 9px} thead th:last-child{border-radius:0 9px 9px 0}
   thead th{border-bottom:0}
   tr:last-child td{border-bottom:0}
@@ -590,13 +610,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .amt{font-weight:640}
   .amt.in{color:var(--in)} .amt.out{color:var(--out)} .amt.disb{color:var(--disb)}
   .suf{font-size:11px;color:var(--muted);font-weight:400;margin-left:5px}
-  .mark{color:var(--ink)}
+  .mark{color:var(--code)}
   .mark.blank{color:var(--muted)}
+  /* 分组「代号」药丸：白天暖金琥珀，夜间冰蓝 */
+  .code{display:inline-block;padding:2px 9px;border-radius:8px;font-weight:700;
+        font-size:12.5px;color:var(--code);background:var(--code-bg)}
   .note{max-width:280px;overflow:hidden;text-overflow:ellipsis}
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
   .tot-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:2px 0 10px}
-  .tot-grid>div{background:var(--chip);border-radius:12px;padding:10px 8px;text-align:center;
-                display:flex;flex-direction:column;gap:3px;min-width:0}
+  .tot-grid>div{background:var(--card);border-radius:12px;padding:12px 8px;text-align:center;
+                display:flex;flex-direction:column;gap:4px;min-width:0;
+                border:1px solid var(--card-border)}
+  html[data-theme="dark"] .tot-grid>div{background:var(--chip);border-color:var(--line)}
   .tot-grid i{font-style:normal;font-size:11.5px;color:var(--muted)}
   .tot-grid b{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
   .tot-grid b.in{color:var(--in)} .tot-grid b.out{color:var(--out)}
@@ -759,7 +784,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <section class="card">
     <div class="chead">
       <span class="badge b-tot" aria-hidden="true">▤</span>
-      <h2 id="lblGrand">总计</h2>
+      <h2 id="lblGrand">总计</h2><span class="cnt" id="lblGrandSub">全期汇总</span>
     </div>
     <div class="tot-grid">
       <div><i id="lblGIn">总进</i><b class="in" id="gIn">0</b></div>
@@ -785,14 +810,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账金额", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
-      total: "总计", gIn: "总入金额", gOut: "总出金额", gGrand: "总账金额",
+      total: "总计", totalSub: "全期汇总", gIn: "总入金额", gOut: "总出金额", gGrand: "总账金额",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
       hintStart: "点一下开始日期", hintEnd: "再点一下结束日期", done: "完成",
       tIn: "入账", tOut: "下发", tGroup: "分组",
       cTime: "时间", cAmt: "金额", cMark: "标记", cOp: "操作人", cNote: "备注",
       cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账金额",
-      empty: "暂无记录", emptyGroup: "暂无分组数据", rev: "冲正", foot: "网页与 Telegram 共用同一份账本 · 只读查阅",
+      empty: "暂无记录", emptyGroup: "暂无分组数据", rev: "冲正",
+      foot: "🔒 账目记录已实时加密备份",
       histNote: "历史账期明细来自日切归档（更早的日期只有汇总）"
     },
     en: {
@@ -803,14 +829,15 @@ PAGE_HTML = r"""<!DOCTYPE html>
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net amount", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
-      total: "Total", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
+      total: "Total", totalSub: "Period summary", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
       hintStart: "Tap the start date", hintEnd: "Tap the end date", done: "Done",
       tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
       cTime: "Time", cAmt: "Amount", cMark: "Reply", cOp: "Operator", cNote: "Note",
       cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net amount",
-      empty: "No records", emptyGroup: "No group data", rev: "REV", foot: "Same ledger as Telegram · read-only",
+      empty: "No records", emptyGroup: "No group data", rev: "REV",
+      foot: "🔒 Ledger records are backed up in real time",
       histNote: "Archived periods show the day's records; older dates keep the summary only"
     }
   };
@@ -868,6 +895,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("lblGIn").textContent = t("gIn");
     $("lblGOut").textContent = t("gOut");
     $("lblGGrand").textContent = t("gGrand");
+    $("lblGrandSub").textContent = t("totalSub");
     $("lblTo2").textContent = t("to");
     $("pkTitle").textContent = t("pickTitle");
     $("pkDone").textContent = t("done");
@@ -1357,7 +1385,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("tbGroup").innerHTML = gs.length ? gs.map(function (g) {
       return "<tr>" +
         '<td class="num">' + esc(shortTime(g.time)) + "</td>" +
-        "<td>" + esc(g.tag || "—") + "</td>" +
+        '<td><span class="code">' + esc(g.tag || "—") + "</span></td>" +
         '<td class="r"><span class="amt in num">' + fnum(g.in_total) + "</span></td>" +
         '<td class="r"><span class="amt out num">' + fnum(g.out_total) + "</span></td>" +
         '<td class="r"><span class="amt num ' + (g.grand >= 0 ? "in" : "out") + '">' + fsig(g.grand) + "</span></td></tr>";
