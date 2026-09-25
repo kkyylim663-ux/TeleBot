@@ -650,20 +650,32 @@ PAGE_HTML = r"""<!DOCTYPE html>
   html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.16);color:var(--brand);
                                            border-color:rgba(56,189,248,.34)}
 
-  /* 面板里的「开始/结束时刻」：整块可点，点哪儿都弹出时间选择器（只有一圈边框） */
+  /* 面板里的「开始/结束时刻」：整块可点，点开自绘的时刻面板（24 小时制） */
   .pk-times{display:flex;gap:10px;margin-top:10px}
-  .pk-times label{flex:1 1 0;min-width:0;display:flex;align-items:center;gap:7px;font-size:12.5px;
-                  color:var(--muted);background:var(--chip);border:1px solid var(--card-border);
-                  border-radius:12px;padding:0 11px;min-height:46px;cursor:pointer;
-                  transition:border-color .15s}
-  .pk-times label:focus-within{border-color:var(--brand)}
-  .pk-times input{flex:1 1 auto;min-width:0;border:0;background:none;color:var(--ink);font:inherit;
-                  font-size:13.5px;font-weight:700;font-variant-numeric:tabular-nums;
-                  padding:12px 0;outline:none;cursor:pointer}
-  /* 藏掉浏览器自带的时钟按钮：它只有小小一块能点，整块可点靠下面的 JS + 自绘图标 */
-  .pk-times input::-webkit-calendar-picker-indicator{display:none}
+  .pk-times .tfield{flex:1 1 0;min-width:0;display:flex;align-items:center;gap:7px;
+                    font:inherit;font-size:12.5px;color:var(--muted);background:var(--chip);
+                    border:1px solid var(--card-border);border-radius:12px;padding:0 11px;
+                    min-height:46px;cursor:pointer;transition:border-color .15s}
+  .pk-times .tfield:hover{border-color:var(--brand)}
+  .pk-times .tfield b{flex:1 1 auto;min-width:0;font-size:14px;font-weight:700;color:var(--ink);
+                      font-variant-numeric:tabular-nums;letter-spacing:.01em;text-align:left}
   .pk-times .tico{flex:0 0 auto;width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;
                   stroke-linecap:round;color:var(--muted);pointer-events:none}
+  /* 时刻面板：上面一行说明当前在改哪个、下面时/分两列滚动选 */
+  .tp-which{display:flex;align-items:baseline;gap:8px;margin-top:10px;font-size:12.5px;color:var(--muted)}
+  .tp-which b{margin-left:auto;font-size:20px;font-weight:700;color:var(--ink);
+              font-variant-numeric:tabular-nums;letter-spacing:.02em}
+  .tp-cols{display:flex;gap:10px;margin-top:8px}
+  .tp-col{flex:1 1 0;min-width:0}
+  .tp-lab{font-size:11.5px;color:var(--muted);text-align:center;padding-bottom:4px}
+  .tp-scroll{max-height:min(224px,34vh);overflow-y:auto;-webkit-overflow-scrolling:touch;
+             border:1px solid var(--card-border);border-radius:12px;background:var(--chip);
+             padding:4px;scrollbar-width:thin}
+  .tp-scroll button{display:block;width:100%;min-height:40px;border:0;background:none;color:var(--ink);
+                    font:inherit;font-size:14px;font-variant-numeric:tabular-nums;border-radius:9px;
+                    cursor:pointer;text-align:center;padding:8px 0}
+  .tp-scroll button:hover{background:var(--card)}
+  .tp-scroll button.on{background:var(--brand);color:#fff;font-weight:700}
 
   /* ---------- 底部汇总：三行（标签左、金额右） ---------- */
   .tot-rows{margin:2px 0 10px}
@@ -785,8 +797,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div class="grab"></div>
       <div class="pk-head"><b id="pkTitle">选择日期</b><button class="pk-x" id="pkClose" type="button" aria-label="关闭">✕</button></div>
     <div class="pk-times">
-      <label><span id="lblTimeStart">开始</span><input type="time" id="tStart" value="00:00"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></label>
-      <label><span id="lblTimeEnd">结束</span><input type="time" id="tEnd" value="23:59"><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></label>
+      <button class="tfield" id="tStart" type="button"><span class="tlab" id="lblTimeStart">开始</span><b id="tStartVal">00:00</b><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></button>
+      <button class="tfield" id="tEnd" type="button"><span class="tlab" id="lblTimeEnd">结束</span><b id="tEndVal">23:59</b><svg class="tico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.6V12.3l3 1.8"/></svg></button>
     </div>
       <div class="cal-head">
         <button class="mv" id="calPrev" type="button" aria-label="上个月">‹</button>
@@ -796,6 +808,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <div class="cal-grid" id="calWeek"></div>
       <div class="cal-grid" id="calDays"></div>
       <button class="pk-done" id="pkDone">完成</button>
+    </div>
+  </div>
+  <div class="picker tpk" id="tpicker">
+    <div class="picker-wrap">
+      <div class="grab"></div>
+      <div class="pk-head"><b id="tpTitle">选择时刻</b><button class="pk-x" id="tpClose" type="button" aria-label="关闭">✕</button></div>
+      <div class="tp-which"><span id="tpWhich">开始时刻</span><b id="tpNow">00:00</b></div>
+      <div class="tp-cols">
+        <div class="tp-col"><div class="tp-lab" id="tpHourLab">时</div><div class="tp-scroll" id="tpHours" role="listbox" aria-labelledby="tpHourLab"></div></div>
+        <div class="tp-col"><div class="tp-lab" id="tpMinLab">分</div><div class="tp-scroll" id="tpMins" role="listbox" aria-labelledby="tpMinLab"></div></div>
+      </div>
+      <button class="pk-done" id="tpDone">完成</button>
     </div>
   </div>
 
@@ -909,6 +933,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
       listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
       foldHint: "点击收起 / 展开这张表",
+      tpTitle: "选择时刻", tpStart: "开始时刻", tpEnd: "结束时刻", tpHour: "时", tpMin: "分",
       pullDown: "下拉刷新", pullRelease: "松手刷新", pullBusy: "刷新中…",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
@@ -933,6 +958,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
       listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
       foldHint: "Tap to collapse / expand",
+      tpTitle: "Pick a time", tpStart: "Start time", tpEnd: "End time", tpHour: "Hour", tpMin: "Min",
       pullDown: "Pull to refresh", pullRelease: "Release to refresh", pullBusy: "Refreshing…",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
@@ -998,6 +1024,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("clrDate").setAttribute("aria-label", t("clearDate"));
     $("lblTimeStart").textContent = t("timeStart");
     $("lblTimeEnd").textContent = t("timeEnd");
+    renderTimes();
+    if ($("tpicker").classList.contains("on")) renderTP();
     [["scopeAmount", "amount"], ["scopeMark", "mark"],
      ["scopeOperator", "operator"], ["scopeNote", "note"]].forEach(function (p) {
       var b = document.querySelector('#scopeChips button[data-scope="' + p[1] + '"]');
@@ -1792,10 +1820,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
-  $("mask").addEventListener("click", closePicker);
+  $("mask").addEventListener("click", function () { closePicker(); closeTP(); });
   $("pkClose").addEventListener("click", closePicker);
   $("pkDone").addEventListener("click", closePicker);
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closePicker(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") { closePicker(); closeTP(); } });
   $("calDays").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-date]");
     if (b) pickDay(b.dataset.date);
@@ -1812,23 +1840,80 @@ PAGE_HTML = r"""<!DOCTYPE html>
     R.startDate = ""; R.endDate = ""; R.active = "start";   // 清空后重新从「开始」点起
     renderRange(); debouncedLoad();
   });
-  $("tStart").addEventListener("change", function () {
-    R.startTime = this.value || "00:00";
-    debouncedLoad();
-  });
-  $("tEnd").addEventListener("change", function () {
-    R.endTime = this.value || "23:59";
-    debouncedLoad();
-  });
+  /* 时刻字段上显示的始终是 R 里的值（24 小时制），改时刻只在自绘面板里改 */
+  function renderTimes() {
+    $("tStartVal").textContent = R.startTime;
+    $("tEndVal").textContent = R.endTime;
+  }
   /* 时刻整块可点：点标签、时间文字或时钟图标任意位置都弹出时间选择器
      （浏览器自带的时钟按钮只有一小块能点，已用 CSS 藏掉，改由整块区域触发） */
-  document.querySelectorAll(".pk-times label").forEach(function (lb) {
-    var inp = lb.querySelector("input");
-    lb.addEventListener("click", function (e) {
-      if (e.target !== inp) e.preventDefault();   // 否则 label 会把这次点击再转给 input，弹两次
-      try { inp.showPicker(); } catch (err) { inp.focus(); }
+  /* ---------- 时刻面板（自绘，24 小时制）：时 / 分两列滚动选，选中即生效 ---------- */
+  var TP = { which: "start", h: 0, m: 0 };
+  /* 补零用上面已有的 pad2（与日期格式化共用一套） */
+  function parseHM(v, dflt) {
+    var mt = /^(\d{1,2}):(\d{1,2})$/.exec(String(v || ""));
+    if (!mt) return dflt;
+    var h = Math.min(23, Math.max(0, +mt[1])), m = Math.min(59, Math.max(0, +mt[2]));
+    return [h, m];
+  }
+  function renderTP() {
+    var isStart = TP.which === "start";
+    var hrs = [], mins = [], i;
+    for (i = 0; i < 24; i++) {
+      hrs.push('<button type="button" role="option" data-h="' + i + '" aria-selected="' +
+               (i === TP.h ? "true" : "false") + '"' + (i === TP.h ? ' class="on"' : "") + ">" +
+               pad2(i) + "</button>");
+    }
+    for (i = 0; i < 60; i++) {
+      mins.push('<button type="button" role="option" data-m="' + i + '" aria-selected="' +
+                (i === TP.m ? "true" : "false") + '"' + (i === TP.m ? ' class="on"' : "") + ">" +
+                pad2(i) + "</button>");
+    }
+    $("tpHours").innerHTML = hrs.join("");
+    $("tpMins").innerHTML = mins.join("");
+    $("tpNow").textContent = pad2(TP.h) + ":" + pad2(TP.m);
+    $("tpWhich").textContent = isStart ? t("tpStart") : t("tpEnd");
+    $("tpTitle").textContent = t("tpTitle");
+    $("tpHourLab").textContent = t("tpHour");
+    $("tpMinLab").textContent = t("tpMin");
+    $("tpDone").textContent = t("done");
+    // 选中的那一项滚到中间：默认结束 23:59 时不用手动翻到底
+    // （用 rect 算，别用 offsetTop —— 列表不是定位元素，offsetTop 是相对更外层的祖先量的）
+    ["tpHours", "tpMins"].forEach(function (id) {
+      var box = $(id), on = box.querySelector("button.on");
+      if (!on) return;
+      var br = box.getBoundingClientRect(), or = on.getBoundingClientRect();
+      box.scrollTop += (or.top - br.top) - (box.clientHeight - or.height) / 2;
     });
-  });
+  }
+  function applyTP() {
+    var v = pad2(TP.h) + ":" + pad2(TP.m);
+    if (TP.which === "start") { R.startTime = v; $("tStartVal").textContent = v; }
+    else { R.endTime = v; $("tEndVal").textContent = v; }
+    renderRange();          // 日期行上的「00:00 至 23:59」跟着变
+    debouncedLoad();
+  }
+  function openTP(which) {
+    TP.which = which;
+    var cur = parseHM(which === "start" ? R.startTime : R.endTime, which === "start" ? [0, 0] : [23, 59]);
+    TP.h = cur[0]; TP.m = cur[1];
+    renderTP();
+    $("mask").classList.add("on"); $("tpicker").classList.add("on");
+  }
+  function closeTP() { $("mask").classList.remove("on"); $("tpicker").classList.remove("on"); }
+  $("tStart").addEventListener("click", function () { openTP("start"); });
+  $("tEnd").addEventListener("click", function () { openTP("end"); });
+  $("tpClose").addEventListener("click", closeTP);
+  $("tpDone").addEventListener("click", closeTP);
+  function tpPick(e) {
+    var h = e.target.closest("button[data-h]"), m = e.target.closest("button[data-m]");
+    if (!h && !m) return;
+    if (h) TP.h = +h.dataset.h; else TP.m = +m.dataset.m;
+    applyTP();
+    renderTP();
+  }
+  $("tpHours").addEventListener("click", tpPick);
+  $("tpMins").addEventListener("click", tpPick);
 
   /* ---------- 下拉刷新：页面已经在顶部时往下拉，松手重新拉一次数据 ---------- */
   var PULL_MAX = 76, PULL_TRIG = 54;
@@ -1852,7 +1937,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   window.addEventListener("touchstart", function (e) {
     if (pull.busy || window.scrollY > 0 || e.touches.length !== 1) return;
-    if ($("picker").classList.contains("on")) return;       // 日期面板开着时别抢手势
+    if ($("picker").classList.contains("on") || $("tpicker").classList.contains("on")) return;  // 任一面板开着时别抢手势
     pull.on = true; pull.y0 = e.touches[0].clientY; pull.d = 0;
   }, { passive: true });
   window.addEventListener("touchmove", function (e) {
@@ -1876,6 +1961,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   applyTheme();
   applyLang();
   renderQ();
+  renderTimes();
   initFold();
   if (!ID || !T) {
     banner(LANG === "zh" ? "链接缺少签名参数，请从 Telegram 里的「📋 账单明细」按钮重新进入"
