@@ -611,6 +611,19 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .search-row input::placeholder{color:var(--muted)}
   .search-row input:focus{border-color:var(--brand)}
   .clr-btn.small{width:44px;height:44px;background:var(--chip)}
+  /* 「操作人」下拉：固定定位浮在搜索框下方，可搜索、点一项即筛 */
+  .q-caret{font-size:13px;color:var(--muted)}
+  .q-list{position:fixed;z-index:30;background:var(--card);border:1px solid var(--card-border);
+          border-radius:12px;box-shadow:0 12px 30px -12px rgba(13,21,32,.45);
+          max-height:min(280px,50vh);overflow:auto;padding:6px;
+          -webkit-overflow-scrolling:touch}
+  .q-list button{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;border:0;
+                 background:none;color:var(--ink);font:inherit;font-size:13.5px;text-align:left;
+                 padding:9px 10px;border-radius:9px;cursor:pointer}
+  .q-list button:hover,.q-list button.on{background:var(--chip)}
+  .q-list button .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .q-list button .cnt{flex:0 0 auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .q-list .none{padding:12px 10px;font-size:13px;color:var(--muted)}
   .chips{display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:1px;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
   .chips button{flex:0 0 auto;border:1px solid var(--card-border);background:var(--card);color:var(--muted);
@@ -764,9 +777,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
   <section class="range">
     <div class="search-row">
       <span class="ico" aria-hidden="true">🔍</span>
-      <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…">
+      <input type="text" id="qInput" autocomplete="off" placeholder="搜索金额 / 标记 / 操作人 / 备注…"
+             role="combobox" aria-expanded="false" aria-controls="qList">
       <button class="clr-btn small" id="qClear" type="button" hidden aria-label="清除搜索">✕</button>
+      <button class="clr-btn small q-caret" id="qCaret" type="button" hidden aria-label="展开操作人列表">▾</button>
     </div>
+    <div class="q-list" id="qList" role="listbox" aria-label="操作人" hidden></div>
     <div class="chips" id="scopeChips">
       <button type="button" data-scope="all" class="on">全部</button>
       <button type="button" data-scope="amount">金额</button>
@@ -862,6 +878,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "总计", totalSub: "全期汇总", gIn: "总入账", gOut: "总下发", gGrand: "总金额",
       searchPh: "搜索金额 / 标记 / 操作人 / 备注…", scopeAll: "全部", scopeAmount: "金额",
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
+      opPh: "搜索或选择操作人…", noOperator: "没有匹配的操作人", opList: "展开操作人列表",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
@@ -884,6 +901,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       total: "Total", totalSub: "Period summary", gIn: "Total in", gOut: "Total out", gGrand: "Net amount",
       searchPh: "Search amount / reply / operator / note…", scopeAll: "All", scopeAmount: "Amount",
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
+      opPh: "Search or pick an operator…", noOperator: "No matching operator", opList: "Show operator list",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
@@ -977,6 +995,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("expXlsx").textContent = "📊 " + t("exportXlsx");
     if (typeof applyTheme === "function") applyTheme();
     $("langBtn").textContent = LANG === "zh" ? "EN" : "中文";
+    $("qCaret").setAttribute("aria-label", t("opList"));
+    $("qList").setAttribute("aria-label", t("opList"));
+    renderQ();                       // 占位字/下拉箭头/下拉里的话术都跟着语言与筛选范围走
+    if (QL_ON) renderQList();
     if (VIEW) renderTables();
   }
 
@@ -1481,12 +1503,68 @@ PAGE_HTML = r"""<!DOCTYPE html>
            qNorm(fields.operator).indexOf(q) >= 0 || qNorm(fields.note).indexOf(q) >= 0;
   }
   function renderQ() {
+    var isOp = Q.scope === "operator";
     $("qClear").hidden = !Q.text;
+    $("qCaret").hidden = !isOp;                       // 只有「操作人」才有下拉
+    $("qInput").setAttribute("placeholder", isOp ? t("opPh") : t("searchPh"));
     document.querySelectorAll("#scopeChips button").forEach(function (b) {
       var on = b.dataset.scope === Q.scope;
       b.classList.toggle("on", on);
       b.setAttribute("aria-pressed", on ? "true" : "false");
     });
+  }
+
+  /* ---------- 「操作人」下拉：列出当前日期区间出现过的操作人（带笔数），可打字过滤 ---------- */
+  var QL_ON = false;
+  function opNames() {
+    if (!VIEW) return [];
+    var m = {};
+    (VIEW.entries || []).forEach(function (e) {
+      var n = (e.operator_name || "").trim();
+      if (n) m[n] = (m[n] || 0) + 1;
+    });
+    return Object.keys(m).sort(function (a, b) { return m[b] - m[a] || (a < b ? -1 : 1); })
+                 .map(function (n) { return { name: n, count: m[n] }; });
+  }
+  function placeQList() {
+    var el = $("qList"), r = $("qInput").getBoundingClientRect();
+    el.style.left = Math.round(r.left) + "px";
+    el.style.width = Math.round(r.width) + "px";
+    var h = el.offsetHeight;
+    // 下面放不下就翻到输入框上方，别被手机键盘遮住
+    if (window.innerHeight - r.bottom - 8 < Math.min(h, 200) && r.top - 8 > Math.min(h, 200)) {
+      el.style.top = Math.round(r.top - 6 - h) + "px";
+    } else {
+      el.style.top = Math.round(r.bottom + 6) + "px";
+    }
+  }
+  function renderQList() {
+    if (!QL_ON) { $("qList").hidden = true; $("qInput").setAttribute("aria-expanded", "false"); return; }
+    var q = qNorm(Q.text);
+    var hit = opNames().filter(function (o) { return !q || qNorm(o.name).indexOf(q) >= 0; });
+    $("qList").innerHTML = hit.length ? hit.map(function (o) {
+      var on = qNorm(o.name) === q;
+      return '<button type="button" role="option" data-name="' + esc(o.name) + '" aria-selected="' +
+             (on ? "true" : "false") + '"' + (on ? ' class="on"' : "") + '><span class="nm">' +
+             esc(o.name) + '</span><span class="cnt">' + o.count +
+             (LANG === "zh" ? " 笔" : "") + "</span></button>";
+    }).join("") : '<div class="none">' + esc(t("noOperator")) + "</div>";
+    $("qList").hidden = false;
+    $("qInput").setAttribute("aria-expanded", "true");
+    placeQList();
+  }
+  function openQList() {
+    if (Q.scope !== "operator") return;
+    QL_ON = true; renderQList();
+  }
+  function closeQList() {
+    if (!QL_ON) return;
+    QL_ON = false; renderQList();
+  }
+  function pickOperator(name) {
+    Q.text = name;
+    $("qInput").value = name;
+    renderQ(); renderTables();
   }
 
   function amountCell(e) {
@@ -1571,6 +1649,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     gg.textContent = fsig(netAmount);
     gg.className = "num " + (netAmount >= 0 ? "in" : "out");
     document.querySelectorAll(".tw").forEach(function (el) { el.removeAttribute("aria-busy"); });
+    if (QL_ON) renderQList();        // 数据换了，下拉里的操作人与笔数跟着刷新
   }
 
   /* ---------- 事件 ---------- */
@@ -1607,18 +1686,41 @@ PAGE_HTML = r"""<!DOCTYPE html>
   $("qInput").addEventListener("input", function () {
     Q.text = this.value.trim();
     renderQ();
+    if (QL_ON) renderQList();
     clearTimeout(qTimer);
     qTimer = setTimeout(renderTables, 180);
   });
+  $("qInput").addEventListener("focus", openQList);
+  $("qInput").addEventListener("click", openQList);   // 已经聚焦时再点也要把下拉顶出来
+  $("qInput").addEventListener("keydown", function (e) { if (e.key === "Escape") closeQList(); });
+  $("qCaret").addEventListener("click", function () {
+    if (QL_ON) { closeQList(); } else { $("qInput").focus(); openQList(); }
+  });
+  $("qList").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-name]");
+    if (!b) return;
+    closeQList();
+    pickOperator(b.dataset.name);
+  });
+  document.addEventListener("click", function (e) {
+    if (!QL_ON) return;
+    // 点搜索框/箭头/下拉本身/切筛选范围的 chips 都不算「外面」
+    if (e.target.closest("#qList") || e.target.closest(".search-row") || e.target.closest("#scopeChips")) return;
+    closeQList();
+  });
+  window.addEventListener("scroll", closeQList, { passive: true });
+  window.addEventListener("resize", function () { if (QL_ON) placeQList(); });
   $("qClear").addEventListener("click", function () {
     Q.text = ""; $("qInput").value = "";
-    renderQ(); renderTables();
+    renderQ(); if (QL_ON) renderQList(); renderTables();
   });
   $("scopeChips").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-scope]");
     if (!b) return;
     Q.scope = b.dataset.scope;
     renderQ();
+    // 切到「操作人」就把下拉顶出来（点一下 chip 即可选人，不用先打字）
+    if (Q.scope === "operator") { $("qInput").focus(); openQList(); } else { closeQList(); }
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
