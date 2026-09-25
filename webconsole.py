@@ -647,14 +647,21 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .q-list button .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .q-list button .cnt{flex:0 0 auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .q-list .none{padding:12px 10px;font-size:13px;color:var(--muted)}
-  .chips{display:flex;gap:6px;overflow-x:auto;margin-top:10px;padding-bottom:1px;scrollbar-width:none}
+  /* 搜索范围 chips：浅底药丸，选中的填焦糖色并带一点浮起感；悬停/按下都有反馈 */
+  .chips{display:flex;gap:7px;overflow-x:auto;margin-top:11px;padding:1px 0 2px;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
-  .chips button{flex:0 0 auto;border:1px solid var(--card-border);background:var(--card);color:var(--muted);
-                border-radius:99px;font:inherit;font-size:12.5px;padding:8px 13px;min-height:36px;
-                cursor:pointer;white-space:nowrap}
-  .chips button.on{background:var(--brand);border-color:transparent;color:#fff;font-weight:700}
-  html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.16);color:var(--brand);
-                                           border-color:rgba(56,189,248,.34)}
+  .chips button{flex:0 0 auto;border:1px solid transparent;background:var(--chip);color:var(--ink);
+                border-radius:999px;font:inherit;font-size:12.5px;font-weight:650;letter-spacing:.01em;
+                padding:9px 15px;min-height:38px;cursor:pointer;white-space:nowrap;
+                transition:background .15s,color .15s,box-shadow .15s,transform .12s}
+  .chips button:hover{background:var(--brand-bg);color:var(--brand)}
+  .chips button:active{transform:scale(.96)}
+  .chips button.on{background:var(--brand);color:#fff;box-shadow:0 3px 10px -4px rgba(159,88,48,.75)}
+  .chips button.on:hover{background:var(--brand);color:#fff}
+  html[data-theme="dark"] .chips button{background:var(--chip);color:var(--ink)}
+  html[data-theme="dark"] .chips button:hover{background:rgba(56,189,248,.14);color:var(--brand)}
+  html[data-theme="dark"] .chips button.on{background:rgba(56,189,248,.18);color:var(--brand);
+                                           box-shadow:0 0 0 1px rgba(56,189,248,.42) inset}
 
   /* 面板里的「开始/结束时刻」：整块可点，点开自绘的时刻面板（24 小时制） */
   .pk-times{display:flex;gap:10px;margin-top:10px}
@@ -1838,7 +1845,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     // 再点一次已选中的 chip = 取消该范围，回到「所有列一起搜」（此时没有 chip 高亮）
     Q.scope = (Q.scope === b.dataset.scope) ? "all" : b.dataset.scope;
     renderQ();
-    // 只切范围，不自动展开候选列表：选好范围后再点输入框才展开（老板定的流程）
+    // 点 chip 就把候选下拉直接展开（不用再去点搜索框）；不聚焦输入框，避免手机上先弹出键盘
+    openQList();
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
