@@ -650,16 +650,16 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .q-list button .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .q-list button .cnt{flex:0 0 auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .q-list .none{padding:12px 10px;font-size:13px;color:var(--muted)}
-  /* 搜索范围 chips：细一圈的浅描边药丸（未选中＝描边+灰字，选中才填焦糖色），主次分明；
-     未选中时是「可加的筛选项」，选中时是「正在生效筛的那一列」 */
-  .chips{display:flex;gap:8px;overflow-x:auto;padding:1px 0 2px;scrollbar-width:none}
-  .chips::-webkit-scrollbar{display:none}
-  .chips button{flex:0 0 auto;border:1px solid var(--card-border);background:transparent;color:var(--muted);
-                border-radius:999px;font:inherit;font-size:12.5px;font-weight:600;letter-spacing:.01em;
-                padding:7px 13px;min-height:34px;cursor:pointer;white-space:nowrap;
+  /* 搜索范围 chips：四等分铺满一整排（宽度一致、跟搜索框同圆角），未选中＝细描边+灰字，
+     选中才填焦糖色 —— 整块搜索区看起来是一套对齐的圆角矩形 */
+  .chips{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:0}
+  .chips button{min-width:0;border:1px solid var(--card-border);background:transparent;color:var(--muted);
+                border-radius:12px;font:inherit;font-size:12.5px;font-weight:600;letter-spacing:.01em;
+                min-height:40px;padding:0 6px;cursor:pointer;white-space:nowrap;
+                overflow:hidden;text-overflow:ellipsis;
                 transition:background .15s,border-color .15s,color .15s,transform .12s}
   .chips button:hover{border-color:var(--brand);color:var(--brand)}
-  .chips button:active{transform:scale(.96)}
+  .chips button:active{transform:scale(.97)}
   .chips button.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:700}
   .chips button.on:hover{background:var(--brand);border-color:var(--brand);color:#fff}
   html[data-theme="dark"] .chips button{border-color:var(--line);color:var(--muted)}
@@ -770,6 +770,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .suf{font-size:11px;margin-left:3px}
   }
   @media (max-width:379px){
+    .chips button{font-size:12px}
     th,td{padding:8px 2px}
   }
 
