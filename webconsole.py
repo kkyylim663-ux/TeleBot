@@ -1574,15 +1574,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   function placeQList() {
     var el = $("qList"), r = $("qInput").getBoundingClientRect();
-    var c = $("scopeChips").getBoundingClientRect();
     el.style.left = Math.round(r.left) + "px";
     el.style.width = Math.round(r.width) + "px";
     var h = el.offsetHeight;
-    // 挂在 chips 下面：列表打开时还能继续点 chips 换范围；下方不够就翻到输入框上方（手机键盘）
-    if (window.innerHeight - c.bottom - 8 < Math.min(h, 200) && r.top - 8 > Math.min(h, 200)) {
+    // 贴着输入框：左边缘与宽度都跟输入框对齐，挂在它正下方；下方不够就翻到上方（手机键盘）
+    if (window.innerHeight - r.bottom - 8 < Math.min(h, 200) && r.top - 8 > Math.min(h, 200)) {
       el.style.top = Math.round(r.top - 6 - h) + "px";
     } else {
-      el.style.top = Math.round(c.bottom + 8) + "px";
+      el.style.top = Math.round(r.bottom + 6) + "px";
     }
   }
   function renderQList() {
@@ -1765,8 +1764,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     // 再点一次已选中的 chip = 取消该范围，回到「所有列一起搜」（此时没有 chip 高亮）
     Q.scope = (Q.scope === b.dataset.scope) ? "all" : b.dataset.scope;
     renderQ();
-    // 换范围就把候选列表按新范围重列（点一下 chip 即可选值，不用先打字）
-    $("qInput").focus(); openQList();
+    // 只切范围，不自动展开候选列表：选好范围后再点输入框才展开（老板定的流程）
     if (Q.text) renderTables();
   });
   $("dateBtn").addEventListener("click", openPicker);
