@@ -661,21 +661,22 @@ PAGE_HTML = r"""<!DOCTYPE html>
                       font-variant-numeric:tabular-nums;letter-spacing:.01em;text-align:left}
   .pk-times .tico{flex:0 0 auto;width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;
                   stroke-linecap:round;color:var(--muted);pointer-events:none}
-  /* 时刻面板：上面一行说明当前在改哪个、下面时/分两列滚动选 */
-  .tp-which{display:flex;align-items:baseline;gap:8px;margin-top:10px;font-size:12.5px;color:var(--muted)}
-  .tp-which b{margin-left:auto;font-size:20px;font-weight:700;color:var(--ink);
-              font-variant-numeric:tabular-nums;letter-spacing:.02em}
-  .tp-cols{display:flex;gap:10px;margin-top:8px}
-  .tp-col{flex:1 1 0;min-width:0}
-  .tp-lab{font-size:11.5px;color:var(--muted);text-align:center;padding-bottom:4px}
-  .tp-scroll{max-height:min(224px,34vh);overflow-y:auto;-webkit-overflow-scrolling:touch;
-             border:1px solid var(--card-border);border-radius:12px;background:var(--chip);
-             padding:4px;scrollbar-width:thin}
-  .tp-scroll button{display:block;width:100%;min-height:40px;border:0;background:none;color:var(--ink);
-                    font:inherit;font-size:14px;font-variant-numeric:tabular-nums;border-radius:9px;
-                    cursor:pointer;text-align:center;padding:8px 0}
-  .tp-scroll button:hover{background:var(--card)}
-  .tp-scroll button.on{background:var(--brand);color:#fff;font-weight:700}
+  /* 时刻下拉：贴着时刻字段弹出的小面板（时 / 分两列滚动），不是弹窗 */
+  .pk-times .tfield.on{border-color:var(--brand)}
+  .tpop{position:fixed;z-index:30;display:flex;gap:6px;padding:6px;
+        background:var(--card);border:1px solid var(--card-border);border-radius:12px;
+        box-shadow:0 12px 30px -12px rgba(13,21,32,.45)}
+  .tpop .tp-col{flex:1 1 0;min-width:0}
+  .tpop .tp-lab{font-size:11px;color:var(--muted);text-align:center;padding-bottom:3px}
+  .tpop .tp-scroll{max-height:min(200px,30vh);overflow-y:auto;-webkit-overflow-scrolling:touch;
+                   border:1px solid var(--card-border);border-radius:10px;background:var(--chip);
+                   padding:3px;scrollbar-width:thin}
+  .tpop .tp-scroll button{display:block;width:100%;min-height:36px;border:0;background:none;
+                          color:var(--ink);font:inherit;font-size:13.5px;
+                          font-variant-numeric:tabular-nums;border-radius:8px;cursor:pointer;
+                          text-align:center;padding:7px 0}
+  .tpop .tp-scroll button:hover{background:var(--card)}
+  .tpop .tp-scroll button.on{background:var(--brand);color:#fff;font-weight:700}
 
   /* ---------- 底部汇总：三行（标签左、金额右） ---------- */
   .tot-rows{margin:2px 0 10px}
@@ -810,17 +811,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <button class="pk-done" id="pkDone">完成</button>
     </div>
   </div>
-  <div class="picker tpk" id="tpicker">
-    <div class="picker-wrap">
-      <div class="grab"></div>
-      <div class="pk-head"><b id="tpTitle">选择时刻</b><button class="pk-x" id="tpClose" type="button" aria-label="关闭">✕</button></div>
-      <div class="tp-which"><span id="tpWhich">开始时刻</span><b id="tpNow">00:00</b></div>
-      <div class="tp-cols">
-        <div class="tp-col"><div class="tp-lab" id="tpHourLab">时</div><div class="tp-scroll" id="tpHours" role="listbox" aria-labelledby="tpHourLab"></div></div>
-        <div class="tp-col"><div class="tp-lab" id="tpMinLab">分</div><div class="tp-scroll" id="tpMins" role="listbox" aria-labelledby="tpMinLab"></div></div>
-      </div>
-      <button class="pk-done" id="tpDone">完成</button>
-    </div>
+  <div class="tpop" id="tpop" hidden>
+    <div class="tp-col"><div class="tp-lab" id="tpHourLab">时</div><div class="tp-scroll" id="tpHours" role="listbox" aria-labelledby="tpHourLab"></div></div>
+    <div class="tp-col"><div class="tp-lab" id="tpMinLab">分</div><div class="tp-scroll" id="tpMins" role="listbox" aria-labelledby="tpMinLab"></div></div>
   </div>
 
   <section class="range">
@@ -933,7 +926,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
       listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
       foldHint: "点击收起 / 展开这张表",
-      tpTitle: "选择时刻", tpStart: "开始时刻", tpEnd: "结束时刻", tpHour: "时", tpMin: "分",
+      tpHour: "时", tpMin: "分",
       pullDown: "下拉刷新", pullRelease: "松手刷新", pullBusy: "刷新中…",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
@@ -958,7 +951,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
       listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
       foldHint: "Tap to collapse / expand",
-      tpTitle: "Pick a time", tpStart: "Start time", tpEnd: "End time", tpHour: "Hour", tpMin: "Min",
+      tpHour: "Hour", tpMin: "Min",
       pullDown: "Pull to refresh", pullRelease: "Release to refresh", pullBusy: "Refreshing…",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
@@ -1025,7 +1018,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("lblTimeStart").textContent = t("timeStart");
     $("lblTimeEnd").textContent = t("timeEnd");
     renderTimes();
-    if ($("tpicker").classList.contains("on")) renderTP();
+    if (!$("tpop").hidden) renderTP();
     [["scopeAmount", "amount"], ["scopeMark", "mark"],
      ["scopeOperator", "operator"], ["scopeNote", "note"]].forEach(function (p) {
       var b = document.querySelector('#scopeChips button[data-scope="' + p[1] + '"]');
@@ -1793,17 +1786,24 @@ PAGE_HTML = r"""<!DOCTYPE html>
   });
   // 点空白处收起候选列表。用 pointerdown（鼠标与触摸都会先发这个）而不是等 click：
   // 触摸端手指常有几像素抖动，一旦被下拉刷新 preventDefault 掉，click 就不会来了
-  document.addEventListener("pointerdown", function (e) {
-    if (!QL_ON) return;
-    if (e.target.closest("#qList") || e.target.closest(".search-row") || e.target.closest("#scopeChips")) return;
-    closeQList();
-  });
-  document.addEventListener("click", function (e) {
-    if (!QL_ON) return;
-    // 点搜索框/箭头/下拉本身/切筛选范围的 chips 都不算「外面」
-    if (e.target.closest("#qList") || e.target.closest(".search-row") || e.target.closest("#scopeChips")) return;
-    closeQList();
-  });
+  function outsideClose(e) {
+    // 用 composedPath 判断是不是「自己人」：点下拉里的选项会重建列表，
+    // 那时 e.target 已经脱离文档树，closest() 找不到祖先会把下拉误关掉
+    var path = e.composedPath ? e.composedPath() : [e.target];
+    function inSel(sel) {
+      for (var i = 0; i < path.length; i++) {
+        var n = path[i];
+        if (n.nodeType === 1 && n.matches && n.matches(sel)) return true;
+      }
+      return false;
+    }
+    // 搜索候选：点搜索框/箭头/下拉本身/切范围的 chips 都不算「外面」
+    if (QL_ON && !inSel("#qList") && !inSel(".search-row") && !inSel("#scopeChips")) closeQList();
+    // 时刻下拉：点两个时刻字段或下拉本身不算「外面」
+    if (!$("tpop").hidden && !inSel("#tpop") && !inSel("#tStart") && !inSel("#tEnd")) closeTP();
+  }
+  document.addEventListener("pointerdown", outsideClose);   // 触摸端 click 可能被吞，按下去就判
+  document.addEventListener("click", outsideClose);
   window.addEventListener("scroll", closeQList, { passive: true });
   window.addEventListener("resize", function () { if (QL_ON) placeQList(); });
   $("qClear").addEventListener("click", function () {
@@ -1847,17 +1847,28 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   /* 时刻整块可点：点标签、时间文字或时钟图标任意位置都弹出时间选择器
      （浏览器自带的时钟按钮只有一小块能点，已用 CSS 藏掉，改由整块区域触发） */
-  /* ---------- 时刻面板（自绘，24 小时制）：时 / 分两列滚动选，选中即生效 ---------- */
+  /* ---------- 时刻下拉（自绘，24 小时制）：贴着字段弹出「时 / 分」两列，选中即生效 ---------- */
   var TP = { which: "start", h: 0, m: 0 };
   /* 补零用上面已有的 pad2（与日期格式化共用一套） */
   function parseHM(v, dflt) {
     var mt = /^(\d{1,2}):(\d{1,2})$/.exec(String(v || ""));
     if (!mt) return dflt;
-    var h = Math.min(23, Math.max(0, +mt[1])), m = Math.min(59, Math.max(0, +mt[2]));
-    return [h, m];
+    return [Math.min(23, Math.max(0, +mt[1])), Math.min(59, Math.max(0, +mt[2]))];
+  }
+  function tpField(which) { return $(which === "start" ? "tStart" : "tEnd"); }
+  function placeTPop() {
+    var el = $("tpop"), r = tpField(TP.which).getBoundingClientRect();
+    el.style.left = Math.round(r.left) + "px";
+    el.style.width = Math.round(r.width) + "px";
+    var h = el.offsetHeight;
+    // 贴着字段：宽度与它对齐、挂在正下方；下面放不下就翻到字段上方（手机键盘弹起时）
+    if (window.innerHeight - r.bottom - 8 < Math.min(h, 150) && r.top - 8 > Math.min(h, 150)) {
+      el.style.top = Math.round(r.top - 6 - h) + "px";
+    } else {
+      el.style.top = Math.round(r.bottom + 6) + "px";
+    }
   }
   function renderTP() {
-    var isStart = TP.which === "start";
     var hrs = [], mins = [], i;
     for (i = 0; i < 24; i++) {
       hrs.push('<button type="button" role="option" data-h="' + i + '" aria-selected="' +
@@ -1871,12 +1882,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     }
     $("tpHours").innerHTML = hrs.join("");
     $("tpMins").innerHTML = mins.join("");
-    $("tpNow").textContent = pad2(TP.h) + ":" + pad2(TP.m);
-    $("tpWhich").textContent = isStart ? t("tpStart") : t("tpEnd");
-    $("tpTitle").textContent = t("tpTitle");
     $("tpHourLab").textContent = t("tpHour");
     $("tpMinLab").textContent = t("tpMin");
-    $("tpDone").textContent = t("done");
     // 选中的那一项滚到中间：默认结束 23:59 时不用手动翻到底
     // （用 rect 算，别用 offsetTop —— 列表不是定位元素，offsetTop 是相对更外层的祖先量的）
     ["tpHours", "tpMins"].forEach(function (id) {
@@ -1885,6 +1892,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       var br = box.getBoundingClientRect(), or = on.getBoundingClientRect();
       box.scrollTop += (or.top - br.top) - (box.clientHeight - or.height) / 2;
     });
+    placeTPop();
   }
   function applyTP() {
     var v = pad2(TP.h) + ":" + pad2(TP.m);
@@ -1897,14 +1905,24 @@ PAGE_HTML = r"""<!DOCTYPE html>
     TP.which = which;
     var cur = parseHM(which === "start" ? R.startTime : R.endTime, which === "start" ? [0, 0] : [23, 59]);
     TP.h = cur[0]; TP.m = cur[1];
+    $("tStart").classList.toggle("on", which === "start");
+    $("tEnd").classList.toggle("on", which === "end");
+    $("tpop").hidden = false;
     renderTP();
-    $("mask").classList.add("on"); $("tpicker").classList.add("on");
   }
-  function closeTP() { $("mask").classList.remove("on"); $("tpicker").classList.remove("on"); }
-  $("tStart").addEventListener("click", function () { openTP("start"); });
-  $("tEnd").addEventListener("click", function () { openTP("end"); });
-  $("tpClose").addEventListener("click", closeTP);
-  $("tpDone").addEventListener("click", closeTP);
+  function closeTP() {
+    if ($("tpop").hidden) return;
+    $("tpop").hidden = true;
+    $("tStart").classList.remove("on");
+    $("tEnd").classList.remove("on");
+  }
+  // 再点同一个字段＝收起，点另一个＝换过去
+  $("tStart").addEventListener("click", function () {
+    if (!$("tpop").hidden && TP.which === "start") { closeTP(); } else { openTP("start"); }
+  });
+  $("tEnd").addEventListener("click", function () {
+    if (!$("tpop").hidden && TP.which === "end") { closeTP(); } else { openTP("end"); }
+  });
   function tpPick(e) {
     var h = e.target.closest("button[data-h]"), m = e.target.closest("button[data-m]");
     if (!h && !m) return;
@@ -1937,7 +1955,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   window.addEventListener("touchstart", function (e) {
     if (pull.busy || window.scrollY > 0 || e.touches.length !== 1) return;
-    if ($("picker").classList.contains("on") || $("tpicker").classList.contains("on")) return;  // 任一面板开着时别抢手势
+    if ($("picker").classList.contains("on") || !$("tpop").hidden) return;   // 日期面板或时刻下拉开着时别抢手势
     pull.on = true; pull.y0 = e.touches[0].clientY; pull.d = 0;
   }, { passive: true });
   window.addEventListener("touchmove", function (e) {
