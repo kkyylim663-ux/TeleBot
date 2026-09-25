@@ -1109,17 +1109,71 @@ PAGE_HTML = r"""<!DOCTYPE html>
     return s;
   }
   // rows: [[值, ...], ...]；数字型写数字，其余按文本
-  function _sheetXml(rows) {
+  /* ---------- Excel 样式表（手写 OOXML 样式：标题/表头/金额/小计） ---------- */
+  var S_TITLE = 1, S_HEAD = 2, S_MONEY = 3, S_SUB_MONEY = 4, S_SUB_TEXT = 5, S_TEXT = 6;
+  var _XLSX_STYLES = (function () {
+    var x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    return x + '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00;[Red]-#,##0.00"/></numFmts>' +
+      '<fonts count="4">' +
+        '<font><sz val="11"/><name val="Calibri"/></font>' +
+        '<font><b/><sz val="11"/><name val="Calibri"/></font>' +
+        '<font><b/><sz val="14"/><name val="Calibri"/></font>' +
+        '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>' +
+      '</fonts>' +
+      '<fills count="4">' +
+        '<fill><patternFill patternType="none"/></fill>' +
+        '<fill><patternFill patternType="gray125"/></fill>' +
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFF2F2F2"/><bgColor indexed="64"/></patternFill></fill>' +
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF2F5C8F"/><bgColor indexed="64"/></patternFill></fill>' +
+      '</fills>' +
+      '<borders count="2">' +
+        '<border><left/><right/><top/><bottom/><diagonal/></border>' +
+        '<border><left/><right/><top/><bottom style="thin"><color rgb="FFBFBFBF"/></bottom><diagonal/></border>' +
+      '</borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="7">' +
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+        '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+        '<xf numFmtId="0" fontId="3" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
+        '<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+        '<xf numFmtId="164" fontId="1" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1"/>' +
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>' +
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>' +
+      '</cellXfs>' +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+      '</styleSheet>';
+  })();
+
+  /* 一行单元格：值本身 → 默认样式；[值, 样式号] → 指定样式 */
+  function _sheetXml(rows, widths, freezeRows) {
     var out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-               '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'];
+               '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'];
+    if (freezeRows) {
+      out.push('<sheetViews><sheetView workbookViewId="0"><pane ySplit="' + freezeRows +
+               '" topLeftCell="A' + (freezeRows + 1) +
+               '" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>');
+    }
+    if (widths && widths.length) {
+      out.push("<cols>" + widths.map(function (w, i) {
+        return '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>';
+      }).join("") + "</cols>");
+    }
+    out.push("<sheetData>");
     rows.forEach(function (row, r) {
+      if (!row.length) return;
       out.push('<row r="' + (r + 1) + '">');
-      row.forEach(function (v, c) {
+      row.forEach(function (cell, c) {
+        if (cell === null || cell === undefined) return;
+        var v = cell, st = 0;
+        if (Object.prototype.toString.call(cell) === "[object Array]") { v = cell[0]; st = cell[1] || 0; }
         var ref = _colName(c) + (r + 1);
+        var sAttr = st ? ' s="' + st + '"' : "";
         if (typeof v === "number" && isFinite(v)) {
-          out.push('<c r="' + ref + '"><v>' + v + "</v></c>");
+          out.push('<c r="' + ref + '"' + sAttr + "><v>" + v + "</v></c>");
         } else {
-          out.push('<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + _xesc(v) + "</t></is></c>");
+          out.push('<c r="' + ref + '"' + sAttr + ' t="inlineStr"><is><t xml:space="preserve">' +
+                   _xesc(v) + "</t></is></c>");
         }
       });
       out.push("</row>");
@@ -1136,48 +1190,70 @@ PAGE_HTML = r"""<!DOCTYPE html>
     var outs = all.filter(function (e) { return e.type === "disburse"; });
     var gs = VIEW.groups || [];
     var T = function (k) { return t(k); };
+    var b0 = bounds();
+    var rangeTxt = (b0.start && b0.end) ? (b0.start.slice(0, 16) + " ~ " + b0.end.slice(0, 16)) : "";
+    var head = (SESSION && SESSION.title ? SESSION.title + " · " : "") +
+               T("title") + " · " + T("currencyLabel") + ":" + (VIEW.currency || "");
+    var meta = (rangeTxt ? rangeTxt + " · " : "") + T("exportedAt") + " " + (VIEW.period || "");
+    // 每张表：标题行 + 期间行 + 表头行（冻结在这行下面）
+    function head3(cols) {
+      return [[[head, S_TITLE]], [[meta, 0]], [],
+              cols.map(function (c) { return [c, S_HEAD]; })];
+    }
 
-    var shIns = [[T("thTime"), T("thAmount"), T("thMark"), T("thOperator"), T("thNote")]];
+    var shIns = head3([T("thTime"), T("thAmount"), T("thMark"), T("thOperator"), T("thNote")]);
     ins.forEach(function (e) {
-      shIns.push([shortTime(e.time),
-                  e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount),
-                  e.reply_user_name || "", e.operator_name || "", e.note || ""]);
+      shIns.push([[shortTime(e.time), S_TEXT],
+                  [e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount), S_MONEY],
+                  [e.reply_user_name || "", S_TEXT], [e.operator_name || "", S_TEXT],
+                  [e.note || "", S_TEXT]]);
     });
     var sumIns = ins.reduce(function (s, e) {
       return s + (e.type === "in" ? Math.abs(e.net_amount) : -Math.abs(e.net_amount));
     }, 0);
-    shIns.push([T("subtotal"), sumIns]);
+    shIns.push([[T("subtotal") + "（" + ins.length + " " + T("unitRows") + "）", S_SUB_TEXT],
+                [sumIns, S_SUB_MONEY]]);
 
-    var shOut = [[T("thTime"), T("thAmount"), T("thFee"), T("thNet"), T("thOperator"), T("thNote")]];
+    var shOut = head3([T("thTime"), T("thAmount"), T("thFee"), T("thNet"), T("thOperator"), T("thNote")]);
     outs.forEach(function (e) {
-      shOut.push([shortTime(e.time), e.amount, e.fee || 0, e.net_amount,
-                  e.operator_name || "", e.note || ""]);
+      shOut.push([[shortTime(e.time), S_TEXT], [e.amount, S_MONEY], [e.fee || 0, S_MONEY],
+                  [e.net_amount, S_MONEY], [e.operator_name || "", S_TEXT], [e.note || "", S_TEXT]]);
     });
     var sumFee = outs.reduce(function (s, e) { return s + (e.fee || 0); }, 0);
     var sumNet = outs.reduce(function (s, e) { return s + e.net_amount; }, 0);
-    shOut.push([T("subtotal"), outs.reduce(function (s, e) { return s + e.amount; }, 0), sumFee, sumNet]);
+    shOut.push([[T("subtotal") + "（" + outs.length + " " + T("unitRows") + "）", S_SUB_TEXT],
+                [outs.reduce(function (s, e) { return s + e.amount; }, 0), S_SUB_MONEY],
+                [sumFee, S_SUB_MONEY], [sumNet, S_SUB_MONEY]]);
 
-    var shGrp = [[T("thTime"), T("thGroup"), T("thIn"), T("thOut"), T("thGrand")]];
-    gs.forEach(function (g) { shGrp.push([shortTime(g.time), g.tag || "", g.in_total, g.out_total, g.grand]); });
-    shGrp.push([T("grandRow"), "", gs.reduce(function (s, g) { return s + g.in_total; }, 0),
-                gs.reduce(function (s, g) { return s + g.out_total; }, 0),
-                gs.reduce(function (s, g) { return s + g.grand; }, 0)]);
+    var shGrp = head3([T("thTime"), T("thGroup"), T("thIn"), T("thOut"), T("thGrand")]);
+    gs.forEach(function (g) {
+      shGrp.push([[shortTime(g.time), S_TEXT], [g.tag || "", S_TEXT], [g.in_total, S_MONEY],
+                  [g.out_total, S_MONEY], [g.grand, S_MONEY]]);
+    });
+    shGrp.push([[T("grandRow") + "（" + gs.length + " " + T("unitGroups") + "）", S_SUB_TEXT],
+                ["", S_SUB_TEXT],
+                [gs.reduce(function (s, g) { return s + g.in_total; }, 0), S_SUB_MONEY],
+                [gs.reduce(function (s, g) { return s + g.out_total; }, 0), S_SUB_MONEY],
+                [gs.reduce(function (s, g) { return s + g.grand; }, 0), S_SUB_MONEY]]);
 
-    var shTot = [[T("total")], [T("gIn"), sumIns], [T("gOut"), sumNet],
-                 [T("gGrand"), sumIns + sumNet]];
-    if (SESSION && SESSION.title) shTot.push([]);
-    if (SESSION && SESSION.title) shTot.push([SESSION.title]);
-    shTot.push([T("currencyLabel") + ": " + (VIEW.currency || "")]);
-    if (voids.length) shTot.push([T("voidShort").replace("%d", voids.length)]);
-    var b = bounds();
-    shTot.push([(b.start && b.end) ? (b.start.slice(0, 16) + " ~ " + b.end.slice(0, 16)) : ""]);
+    var shTot = [[[head, S_TITLE]], [[meta, 0]], [],
+                 [[T("gIn"), S_SUB_TEXT], [sumIns, S_SUB_MONEY]],
+                 [[T("gOut"), S_SUB_TEXT], [sumNet, S_SUB_MONEY]],
+                 [[T("gGrand"), S_SUB_TEXT], [sumIns + sumNet, S_SUB_MONEY]]];
+    if (voids.length) shTot.push([]);
+    if (voids.length) shTot.push([[T("voidShort").replace("%d", voids.length), 0]]);
 
-    var sheets = [[T("tIn"), shIns], [T("tOut"), shOut], [T("tGroup"), shGrp], [T("total"), shTot]];
+    var sheets = [[T("tIn"), shIns, [19, 13, 15, 14, 30]],
+                  [T("tOut"), shOut, [19, 13, 11, 13, 14, 30]],
+                  [T("tGroup"), shGrp, [19, 11, 13, 13, 13]],
+                  [T("total"), shTot, [16, 15]]];
     var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    var stylesRelId = "rId" + (sheets.length + 1);
     var ct = xml + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
       '<Default Extension="xml" ContentType="application/xml"/>' +
       '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
       sheets.map(function (s, i) {
         return '<Override PartName="/xl/worksheets/sheet' + (i + 1) +
                '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
@@ -1194,14 +1270,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
         return '<Relationship Id="rId' + (i + 1) +
                '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' +
                (i + 1) + '.xml"/>';
-      }).join("") + "</Relationships>";
-
+      }).join("") +
+      '<Relationship Id="' + stylesRelId +
+      '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+      "</Relationships>";
     var files = [{ name: "[Content_Types].xml", data: _utf8(ct) },
                  { name: "_rels/.rels", data: _utf8(rels) },
                  { name: "xl/workbook.xml", data: _utf8(wb) },
-                 { name: "xl/_rels/workbook.xml.rels", data: _utf8(wbRels) }];
+                 { name: "xl/_rels/workbook.xml.rels", data: _utf8(wbRels) },
+                 { name: "xl/styles.xml", data: _utf8(_XLSX_STYLES) }];
     sheets.forEach(function (s, i) {
-      files.push({ name: "xl/worksheets/sheet" + (i + 1) + ".xml", data: _utf8(_sheetXml(s[1])) });
+      files.push({ name: "xl/worksheets/sheet" + (i + 1) + ".xml",
+                   data: _utf8(_sheetXml(s[1], s[2], 4)) });
     });
 
     return _zip(files);
