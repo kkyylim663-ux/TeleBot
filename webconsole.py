@@ -580,11 +580,14 @@ PAGE_HTML = r"""<!DOCTYPE html>
      自身不能留内距，否则整张表会被缩进；底部再吃掉卡片那 4px 内距，让表格收到卡片底边，
      由卡片圆角来收口（设计稿就是这样，不会有「细线 + 白边 + 卡片边框」三层） */
   .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px -4px}
-  /* 轻表格（设计稿）：表头一条底色 + 每行下方一条细线；没有竖线、没有表格外框 */
+  /* 轻表格（设计稿）：表头一条底色 + 每行下方一条细线 + 列与列之间的竖线；
+     没有表格外框，也没有把每个单元格都框起来（那是上一版被撤掉的「Excel 满格线」） */
   table{width:100%;border-collapse:collapse;font-size:13.5px}
   th,td{padding:10px 8px;text-align:left;white-space:nowrap}
   th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
      letter-spacing:.02em;border-top:1px solid var(--grid);border-bottom:1px solid var(--grid)}
+  /* 竖线只画在列与列之间（表头行同样有），表格最左/最右不画，所以不是外框 */
+  th + th,td + td{border-left:1px solid var(--grid)}
   tbody td{border-bottom:1px solid var(--grid)}
   tbody tr:last-child td{border-bottom:0}   /* 最后一行不划线，收口交给卡片底边 */
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
