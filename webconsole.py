@@ -625,7 +625,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
         font-size:12.5px;color:var(--code);background:var(--code-bg)}
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
   /* ---------- 搜索行 + 筛选 chips ---------- */
-  .search-row{display:flex;align-items:center;gap:8px}
+  .search-row{display:flex;align-items:center;gap:8px;margin-top:10px}
   /* 放大镜画在输入框里面：绝对定位在左侧，输入文字留出 padding-left */
   .search-row .q-wrap{position:relative;flex:1 1 auto;min-width:0;display:block}
   .search-row .q-ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);
@@ -652,7 +652,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .q-list button .cnt{flex:0 0 auto;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .q-list .none{padding:12px 10px;font-size:13px;color:var(--muted)}
   /* 搜索范围 chips：浅底药丸，选中的填焦糖色并带一点浮起感；悬停/按下都有反馈 */
-  .chips{display:flex;gap:7px;overflow-x:auto;margin-top:11px;padding:1px 0 2px;scrollbar-width:none}
+  .chips{display:flex;gap:7px;overflow-x:auto;padding:1px 0 2px;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
   .chips button{flex:0 0 auto;border:1px solid transparent;background:var(--chip);color:var(--ink);
                 border-radius:999px;font:inherit;font-size:12.5px;font-weight:650;letter-spacing:.01em;
@@ -835,6 +835,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
   </div>
 
   <section class="range">
+    <div class="chips" id="scopeChips">
+      <button type="button" data-scope="amount">金额</button>
+      <button type="button" data-scope="mark">标记</button>
+      <button type="button" data-scope="operator">操作人</button>
+      <button type="button" data-scope="note">备注</button>
+    </div>
     <div class="search-row">
       <span class="q-wrap">
         <svg class="q-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.3"/><path d="M15.5 15.5 20 20"/></svg>
@@ -845,12 +851,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       <button class="clr-btn small q-caret" id="qCaret" type="button" aria-label="展开候选列表">▾</button>
     </div>
     <div class="q-list" id="qList" role="listbox" aria-label="操作人" hidden></div>
-    <div class="chips" id="scopeChips">
-      <button type="button" data-scope="amount">金额</button>
-      <button type="button" data-scope="mark">标记</button>
-      <button type="button" data-scope="operator">操作人</button>
-      <button type="button" data-scope="note">备注</button>
-    </div>
   </section>
 
   <section class="card t-in">
