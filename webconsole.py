@@ -591,8 +591,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px -4px}
   /* 轻表格（设计稿）：表头一条底色 + 每行下方一条细线 + 列与列之间的竖线；
      没有表格外框，也没有把每个单元格都框起来（那是上一版被撤掉的「Excel 满格线」） */
-  table{width:100%;border-collapse:collapse;font-size:13.5px}
-  th,td{padding:10px 8px;text-align:left;white-space:nowrap}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;table-layout:fixed}
+  /* 三张表共用同一套列宽：时间一列 + 其余四等分 —— 所以入账 / 下发 / 分组的列左右对齐，
+     某一格内容再长也只在自己那一列里收（截断），不会把其它列挤歪 */
+  th:nth-child(1){width:22%}
+  th:nth-child(2),th:nth-child(3),th:nth-child(4),th:nth-child(5){width:19.5%}
+  th,td{padding:10px 8px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   th{font-size:12px;font-weight:700;color:var(--muted);position:sticky;top:0;background:var(--thead);
      letter-spacing:.02em;border-top:1px solid var(--grid);border-bottom:1px solid var(--grid)}
   /* 竖线只画在列与列之间（表头行同样有），表格最左/最右不画，所以不是外框 */
@@ -601,7 +605,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   tbody tr:last-child td{border-bottom:0}   /* 最后一行不划线，收口交给卡片底边 */
   /* 斑马纹：偶数行浅底，长表格横向扫读不易串行 */
   tbody tr:nth-child(even) td{background:var(--stripe)}
-  .r{text-align:center}
+  .r{text-align:center;white-space:normal}   /* 数字列放开换行：宁可折行也不把金额截断成「-1,2…」 */
   .amt{font-weight:640}
   .amt.in{color:var(--in)} .amt.out{color:var(--out)} .amt.disb{color:var(--disb)}
   .suf{font-size:11px;color:var(--muted);font-weight:400;margin-left:5px}
@@ -610,7 +614,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* 分组「代号」药丸：白天暖金琥珀，夜间冰蓝 */
   .code{display:inline-block;padding:2px 9px;border-radius:8px;font-weight:700;
         font-size:12.5px;color:var(--code);background:var(--code-bg)}
-  .note{max-width:280px;overflow:hidden;text-overflow:ellipsis}
   /* 底部「总计」独立卡片：总进 / 总出 / 总账（设计稿） */
   /* ---------- 搜索行 + 筛选 chips ---------- */
   .search-row{display:flex;align-items:center;gap:8px}
@@ -729,12 +732,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .tw{margin:0 -8px -4px}     /* 卡片内距收成 8，负外边距跟着收；底部照样吃掉 4px 收到卡片边 */
     th,td{padding:9px 3px;font-size:12.5px}
     th{font-size:11.5px}
-    .note{max-width:84px}
     .suf{font-size:11px;margin-left:3px}
   }
   @media (max-width:379px){
     th,td{padding:8px 2px}
-    .note{max-width:72px}
   }
 
 </style>
