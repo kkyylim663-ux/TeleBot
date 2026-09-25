@@ -784,7 +784,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="q-list" id="qList" role="listbox" aria-label="操作人" hidden></div>
     <div class="chips" id="scopeChips">
-      <button type="button" data-scope="all" class="on">全部</button>
       <button type="button" data-scope="amount">金额</button>
       <button type="button" data-scope="mark">标记</button>
       <button type="button" data-scope="operator">操作人</button>
@@ -967,7 +966,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
     $("clrDate").setAttribute("aria-label", t("clearDate"));
     $("lblTimeStart").textContent = t("timeStart");
     $("lblTimeEnd").textContent = t("timeEnd");
-    [["scopeAll", "all"], ["scopeAmount", "amount"], ["scopeMark", "mark"],
+    [["scopeAmount", "amount"], ["scopeMark", "mark"],
      ["scopeOperator", "operator"], ["scopeNote", "note"]].forEach(function (p) {
       var b = document.querySelector('#scopeChips button[data-scope="' + p[1] + '"]');
       if (b) b.textContent = t(p[0]);
@@ -1728,7 +1727,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
   $("scopeChips").addEventListener("click", function (e) {
     var b = e.target.closest("button[data-scope]");
     if (!b) return;
-    Q.scope = b.dataset.scope;
+    // 再点一次已选中的 chip = 取消该范围，回到「所有列一起搜」（此时没有 chip 高亮）
+    Q.scope = (Q.scope === b.dataset.scope) ? "all" : b.dataset.scope;
     renderQ();
     // 换范围就把候选列表按新范围重列（点一下 chip 即可选值，不用先打字）
     $("qInput").focus(); openQList();
