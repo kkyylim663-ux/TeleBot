@@ -696,7 +696,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     .pdf-doc .doc-total{display:flex;gap:22px;align-items:baseline;margin-top:14px;padding:7px 9px;
                         border-top:2px solid #000;border-bottom:2px solid #000;font-size:11.5px}
     .pdf-doc .doc-total b{font-weight:700;margin-right:6px}
-    .pdf-doc .doc-note{margin-top:6px;font-size:9.5px;color:#333}
     .pdf-doc .doc-foot{margin-top:10px;font-size:9px;color:#555}
     .pdf-doc tr{break-inside:avoid;page-break-inside:avoid}
     .pdf-doc .doc-sec{break-after:avoid;page-break-after:avoid}
@@ -870,7 +869,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "账单明细", sum: "总计",
       toDark: "切换到夜间模式", toLight: "切换到白天模式", export: "导出", exportedAt: "导出时间",
       exportPdf: "导出 PDF", exportXlsx: "导出 Excel", tIn: "入账", tOut: "下发", tGroup: "分组",
-      subtotal: "小计", voidShort: "（另有 %d 笔已撤销）", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
+      subtotal: "小计", records: "记录笔数", currencyLabel: "币种", deposit: "存入 Deposit", withdraw: "下发 Withdraw", entryCount: "有效笔数", inCount: "记一笔", outCount: "下发", secPayouts: "三、下发明细", secGroups: "四、分组明细",
       thTime: "时间", thAmount: "金额", thMark: "标记", thOperator: "操作人", thNote: "备注",
       thFee: "手续费", thNet: "净额", thGroup: "代号", thIn: "总入金额", thOut: "总出金额", thGrand: "总账金额", grandRow: "合计", unitRows: "笔", unitGroups: "组",
       to: "至",
@@ -893,7 +892,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       title: "Bill Details", sum: "Total",
       toDark: "Switch to dark mode", toLight: "Switch to light mode", export: "Export", exportedAt: "Exported",
       exportPdf: "Export PDF", exportXlsx: "Export Excel", tIn: "Deposits", tOut: "Payouts", tGroup: "By group",
-      subtotal: "Subtotal", voidShort: " (+%d voided)", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
+      subtotal: "Subtotal", records: "Records", currencyLabel: "Currency", deposit: "Deposit", withdraw: "Withdraw", entryCount: "Valid entries", inCount: "entries", outCount: "payouts", secPayouts: "3. Payouts detail", secGroups: "4. By group",
       thTime: "Time", thAmount: "Amount", thMark: "Reply", thOperator: "Operator", thNote: "Note",
       thFee: "Fee", thNet: "Net", thGroup: "Group", thIn: "Total in", thOut: "Total out", thGrand: "Net amount", grandRow: "Grand total", unitRows: "rows", unitGroups: "groups",
       to: "to",
@@ -1232,8 +1231,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   function buildXlsx() {
     if (!VIEW) return null;
     var allRows = VIEW.entries || [];
-    var voids = allRows.filter(function (e) { return e.voided; });
-    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销不计入、不列出
+    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销：不列出、不提示
     var ins = all.filter(function (e) { return e.type !== "disburse"; });
     var outs = all.filter(function (e) { return e.type === "disburse"; });
     var gs = VIEW.groups || [];
@@ -1288,8 +1286,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
                  [[T("gIn"), S_SUB_TEXT], [sumIns, S_SUB_MONEY]],
                  [[T("gOut"), S_SUB_TEXT], [sumNet, S_SUB_MONEY]],
                  [[T("gGrand"), S_SUB_TEXT], [sumIns + sumNet, S_SUB_MONEY]]];
-    if (voids.length) shTot.push([]);
-    if (voids.length) shTot.push([[T("voidShort").replace("%d", voids.length), 0]]);
 
     var sheets = [[T("tIn"), shIns, [19, 13, 15, 14, 30]],
                   [T("tOut"), shOut, [19, 13, 11, 13, 14, 30]],
@@ -1381,8 +1377,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
                 " " + pad(now.getHours()) + ":" + pad(now.getMinutes());
 
     var allRows = VIEW.entries || [];
-    var voids = allRows.filter(function (e) { return e.voided; });
-    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销不计入、不列出
+    var all = allRows.filter(function (e) { return !e.voided; });   // 已撤销：不列出、不提示
     var ins = all.filter(function (e) { return e.type !== "disburse"; });
     var outs = all.filter(function (e) { return e.type === "disburse"; });
     var gs = VIEW.groups || [];
@@ -1462,9 +1457,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     E.push('<div class="doc-total"><b>' + esc(t("total")) + "</b><span>" + esc(t("gIn")) + " " +
            esc(fsig(sumIn)) + "</span><span>" + esc(t("gOut")) + " " + esc(fsig(sumOut)) +
            "</span><span>" + esc(t("gGrand")) + " " + esc(fsig(sumIn + sumOut)) + "</span></div>");
-    if (voids.length) {
-      E.push('<div class="doc-note">' + esc(t("voidShort").replace("%d", voids.length)) + "</div>");
-    }
     E.push('<div class="doc-foot">' + esc(t("exportedAt")) + " " + esc(stamp) + "</div>");
 
     $("pdfDoc").innerHTML = E.join("");
@@ -1477,9 +1469,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       $(id).innerHTML = '<tr><td colspan="5" class="empty">' + esc(t("loading")) + "</td></tr>";
     });
     document.querySelectorAll(".tw").forEach(function (el) { el.setAttribute("aria-busy", "true"); });
-  }
-  function voidHint(n) {
-    return n ? t("voidShort").replace("%d", n) : "";
   }
   /* ---------- 三张表 ---------- */
   /* ---------- 搜索 / 筛选：只筛「入账 / 下发」显示的行，所有汇总照旧 ---------- */
@@ -1585,7 +1574,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     // 三张大组（入账/下发/分组）的金额格不显示货币单位：本群币种由 Telegram 统一管理，
     // 即使换过币种这里也只显示数字，币种只看顶栏徽章
     if (e.is_reversal) html += '<span class="suf">' + esc(t("rev")) + "</span>";
-    // 已撤销不再额外加「—」：整行已经灰掉+删除线，再加符号会跟金额挤在一起
     return html;
   }
   function row(e) {
@@ -1601,11 +1589,11 @@ PAGE_HTML = r"""<!DOCTYPE html>
   }
   function renderTables() {
     if (!VIEW) return;
-    // 已撤销的记录不显示在页面上（只统计为提示笔数）
+    // 已撤销的记录整条不出现：不列出、不计数、也不提示
     var allRows = VIEW.entries || [];
-    var ins = [], outs = [], insVoid = 0, outsVoid = 0;
+    var ins = [], outs = [];
     allRows.forEach(function (e) {
-      if (e.voided) { if (e.type === "disburse") outsVoid++; else insVoid++; return; }
+      if (e.voided) return;
       if (e.type === "disburse") outs.push(e); else ins.push(e);
     });
     var unit = LANG === "zh" ? "笔" : "";
@@ -1614,8 +1602,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     function cntTxt(hit, total) {
       return (Q.text && hit !== total ? hit + " / " + total : String(total)) + " " + unit;
     }
-    $("cntIn").textContent = cntTxt(insView.length, ins.length) + voidHint(insVoid);
-    $("cntOut").textContent = cntTxt(outsView.length, outs.length) + voidHint(outsVoid);
+    $("cntIn").textContent = cntTxt(insView.length, ins.length);
+    $("cntOut").textContent = cntTxt(outsView.length, outs.length);
     $("tbIn").innerHTML = insView.length ? insView.map(row).join("")
       : '<tr><td colspan="5" class="empty">' + esc(Q.text ? t("noMatch") : t("empty")) + "</td></tr>";
     $("tbOut").innerHTML = outsView.length ? outsView.map(row).join("")
