@@ -1763,6 +1763,13 @@ PAGE_HTML = r"""<!DOCTYPE html>
     closeQList();
     pickValue(b.dataset.name);
   });
+  // 点空白处收起候选列表。用 pointerdown（鼠标与触摸都会先发这个）而不是等 click：
+  // 触摸端手指常有几像素抖动，一旦被下拉刷新 preventDefault 掉，click 就不会来了
+  document.addEventListener("pointerdown", function (e) {
+    if (!QL_ON) return;
+    if (e.target.closest("#qList") || e.target.closest(".search-row") || e.target.closest("#scopeChips")) return;
+    closeQList();
+  });
   document.addEventListener("click", function (e) {
     if (!QL_ON) return;
     // 点搜索框/箭头/下拉本身/切筛选范围的 chips 都不算「外面」
@@ -1855,7 +1862,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
     if (dy <= 0) { pull.on = false; setPull(0); return; }   // 往上划＝正常滚动
     pull.d = Math.min(dy * 0.55, PULL_MAX);                 // 阻尼：手指动 1px，条子涨 0.55px
     setPull(pull.d);
-    if (pull.d > 4 && e.cancelable) e.preventDefault();     // 拦掉系统回弹/原生下拉
+    if (pull.d > 12 && e.cancelable) e.preventDefault();    // 拦掉系统回弹/原生下拉
+    // 阈值取 12px（手指约 22px）：手指点按时的小抖动不算「下拉」，别把随后的 click 吞掉
   }, { passive: false });
   window.addEventListener("touchend", function () {
     if (!pull.on) return;
