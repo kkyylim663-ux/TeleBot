@@ -679,8 +679,19 @@ PAGE_HTML = r"""<!DOCTYPE html>
   tbody td[colspan]{text-align:center}
   .banner{background:#fdecec;color:#b3261e;border-radius:12px;padding:12px 14px;margin-top:12px;
           font-size:13.5px;line-height:1.5}
+  /* 下拉刷新（手机）：页面已在顶部时往下拉出现，松手重新拉一次数据 */
+  .pull{position:fixed;left:0;right:0;top:0;z-index:24;height:0;overflow:hidden;
+        visibility:hidden;                 /* 收起时连那 1px 下边框也不露出来 */
+        display:flex;align-items:center;justify-content:center;
+        background:var(--card);border-bottom:1px solid var(--card-border);
+        color:var(--muted);font-size:12px;pointer-events:none}
+  .pull.on{visibility:visible}
+  .pull b{display:inline-flex;align-items:center;gap:7px;font-weight:650}
+  .pull .ic{display:inline-block;width:11px;height:11px;border:1.6px solid currentColor;
+            border-right-color:transparent;border-radius:50%;transform:rotate(40deg)}
+  .pull.busy .ic{animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
   html[data-theme="dark"] .banner{background:#2a1a1c}
-  footer{text-align:center;color:var(--muted);font-size:12px;padding:16px 0 4px}
 
 /* ---------- 导出 PDF：只把账单明细清楚地印出来（不做正式报表的花架子） ---------- */
   .pdf-doc{display:none}
@@ -870,8 +881,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </section>
 
-  <footer id="footTip">网页与 Telegram 共用同一份账本 · 只读查阅</footer>
 </div>
+
+<div class="pull" id="pull" aria-hidden="true"><b><span class="ic" id="pullIc"></span><span id="pullTxt">下拉刷新</span></b></div>
 
 <script>
 (function () {
@@ -892,6 +904,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "标记", scopeOperator: "操作人", scopeNote: "备注", noMatch: "没有匹配的记录",
       listPh: "搜索或选择%s…", noValue: "没有匹配的选项", listLabel: "展开候选列表",
       foldHint: "点击收起 / 展开这张表",
+      pullDown: "下拉刷新", pullRelease: "松手刷新", pullBusy: "刷新中…",
       timeStart: "开始", timeEnd: "结束", clearDate: "清除日期", clearSearch: "清除搜索",
       loading: "加载中…",
       pickTitle: "选择日期", pickDate: "选择日期区间", timeOpt: "时间（可选）",
@@ -900,7 +913,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       cTime: "时间", cAmt: "金额", cMark: "标记", cOp: "操作人", cNote: "备注",
       cTag: "代号", cIn: "总入金额", cOut: "总出金额", cGrand: "总账金额",
       empty: "暂无记录", emptyGroup: "暂无分组数据", rev: "冲正",
-      foot: "🔒 账目记录已实时加密备份",
       histNote: "历史账期明细来自日切归档（更早的日期只有汇总）"
     },
     en: {
@@ -916,6 +928,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       scopeMark: "Reply", scopeOperator: "Operator", scopeNote: "Note", noMatch: "No matching records",
       listPh: "Search or pick %s…", noValue: "No matching option", listLabel: "Show suggestions",
       foldHint: "Tap to collapse / expand",
+      pullDown: "Pull to refresh", pullRelease: "Release to refresh", pullBusy: "Refreshing…",
       timeStart: "Start", timeEnd: "End", clearDate: "Clear dates", clearSearch: "Clear search",
       loading: "Loading…",
       pickTitle: "Pick dates", pickDate: "Pick a date range", timeOpt: "Time (optional)",
@@ -924,7 +937,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
       cTime: "Time", cAmt: "Amount", cMark: "Reply", cOp: "Operator", cNote: "Note",
       cTag: "Group", cIn: "Total in", cOut: "Total out", cGrand: "Net amount",
       empty: "No records", emptyGroup: "No group data", rev: "REV",
-      foot: "🔒 Ledger records are backed up in real time",
       histNote: "Archived periods show the day's records; older dates keep the summary only"
     }
   };
@@ -1002,7 +1014,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
      ["thTime3", "cTime"], ["thTag3", "cTag"], ["thIn3", "cIn"], ["thOut3", "cOut"], ["thGrand3", "cGrand"]
     ].forEach(function (p) { $(p[0]).textContent = t(p[1]); });
     if (!VIEW) setLoading();
-    $("footTip").textContent = t("foot");
+    setPull(0);                                    // 下拉刷新的提示语也跟着语言走
     document.querySelectorAll(".chead.foldable").forEach(function (h) {
       h.setAttribute("title", t("foldHint"));      // 鼠标悬停提示：点击收起 / 展开
     });
@@ -1805,6 +1817,47 @@ PAGE_HTML = r"""<!DOCTYPE html>
       try { inp.showPicker(); } catch (err) { inp.focus(); }
     });
   });
+
+  /* ---------- 下拉刷新：页面已经在顶部时往下拉，松手重新拉一次数据 ---------- */
+  var PULL_MAX = 76, PULL_TRIG = 54;
+  var pull = { on: false, y0: 0, d: 0, busy: false };
+  function setPull(px, busy) {
+    var el = $("pull");
+    el.style.height = Math.round(px) + "px";
+    el.classList.toggle("on", px > 0);
+    el.classList.toggle("busy", !!busy);
+    $("pullTxt").textContent = busy ? t("pullBusy")
+                                    : (px >= PULL_TRIG ? t("pullRelease") : t("pullDown"));
+  }
+  function pullRefresh() {
+    setPull(PULL_MAX, true);
+    var t0 = Date.now();
+    return load().catch(function (e) { banner(e.message); }).then(function () {
+      // 数据回得太快会一闪而过，留一个小停顿让人看清「刷新过了」
+      var wait = Math.max(0, 420 - (Date.now() - t0));
+      return new Promise(function (res) { setTimeout(res, wait); });
+    }).then(function () { pull.busy = false; setPull(0); });
+  }
+  window.addEventListener("touchstart", function (e) {
+    if (pull.busy || window.scrollY > 0 || e.touches.length !== 1) return;
+    if ($("picker").classList.contains("on")) return;       // 日期面板开着时别抢手势
+    pull.on = true; pull.y0 = e.touches[0].clientY; pull.d = 0;
+  }, { passive: true });
+  window.addEventListener("touchmove", function (e) {
+    if (!pull.on) return;
+    if (window.scrollY > 0) { pull.on = false; setPull(0); return; }
+    var dy = e.touches[0].clientY - pull.y0;
+    if (dy <= 0) { pull.on = false; setPull(0); return; }   // 往上划＝正常滚动
+    pull.d = Math.min(dy * 0.55, PULL_MAX);                 // 阻尼：手指动 1px，条子涨 0.55px
+    setPull(pull.d);
+    if (pull.d > 4 && e.cancelable) e.preventDefault();     // 拦掉系统回弹/原生下拉
+  }, { passive: false });
+  window.addEventListener("touchend", function () {
+    if (!pull.on) return;
+    pull.on = false;
+    if (pull.d >= PULL_TRIG) { pull.busy = true; pullRefresh(); } else { setPull(0); }
+  });
+  window.addEventListener("touchcancel", function () { pull.on = false; setPull(0); });
 
   /* ---------- 启动 ---------- */
   applyTheme();
