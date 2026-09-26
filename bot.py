@@ -2938,6 +2938,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat is not None and chat.title:
         _CHAT_TITLES[str(chat.id)] = chat.title  # 网页控制台顶部展示群名称用
 
+    text = (update.message.text or update.message.caption or "").strip()
+    bot_username = context.bot.username
+    if bot_username:
+        text = text.replace(f"@{bot_username}", "").strip()
+
+    text = normalize(text)
+
     # 私聊不支持记账：命中入账/下发/清空类指令形态时给一条引导语，不执行、不建账
     if chat is not None and chat.type == "private":
         if RE_LEDGER_ENTRY.match(text) or RE_LEDGER_DISBURSE.match(text) \
@@ -2945,13 +2952,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 or RE_REVOKE.match(text) or RE_REVOKE_RESTORE.match(text) or RE_RETRACT.match(text):
             await update.message.reply_text("入账 / 下发 / 清空账单请在群聊里操作，私聊暂不支持记账。")
             return
-
-    text = (update.message.text or update.message.caption or "").strip()
-    bot_username = context.bot.username
-    if bot_username:
-        text = text.replace(f"@{bot_username}", "").strip()
-
-    text = normalize(text)
 
     # USDT 地址查重 + TRON 钱包信息卡片：群里任何人发的消息都检测，不限操作员
     await handle_usdt_addresses(update, context, text)
