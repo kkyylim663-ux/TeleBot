@@ -943,11 +943,16 @@ async def build_global_bill_for_date_text(context: ContextTypes.DEFAULT_TYPE, da
         in_amount = round(in_amount, 4)
         out_amount = round(out_amount, 4)
 
+        # 进/出全为 0 且无笔数的群不显示在全局账单里
+        if in_amount == 0 and out_amount == 0 and count == 0:
+            continue
+
         try:
             chat = await context.bot.get_chat(chat_id)
             name = chat.title or chat.full_name or str(chat_id)
+            _CHAT_TITLES[chat_id_str] = name  # 拉到后写回缓存，重启/限流时群名仍可用
         except Exception:
-            name = str(chat_id)
+            name = _CHAT_TITLES.get(chat_id_str) or str(chat_id)
         name = html.escape(name)
 
         group_lines.append(f"{name} 进：{_fmt_num(in_amount)} 出：{_fmt_num(out_amount)}")
@@ -996,6 +1001,11 @@ async def build_global_bill_text(context: ContextTypes.DEFAULT_TYPE, chat_id) ->
         out_amount = round(-sum(disburse_totals.values()), 4)
 
         period_entries = _period_entries(g_id)
+
+        # 进/出全为 0 且无笔数的群不显示在全局账单里
+        if in_amount == 0 and out_amount == 0 and not period_entries:
+            continue
+
         total_txn_count += len(period_entries)
         total_in += in_amount
         total_out += out_amount
@@ -1004,8 +1014,9 @@ async def build_global_bill_text(context: ContextTypes.DEFAULT_TYPE, chat_id) ->
         try:
             chat = await context.bot.get_chat(g_id)
             name = chat.title or chat.full_name or str(g_id)
+            _CHAT_TITLES[str(g_id)] = name  # 拉到后写回缓存，重启/限流时群名仍可用
         except Exception:
-            name = str(g_id)
+            name = _CHAT_TITLES.get(str(g_id)) or str(g_id)
         name = html.escape(name)
 
         group_lines.append(f"{name} 进：{_fmt_num(in_amount)} 出：{_fmt_num(out_amount)}")
@@ -2925,6 +2936,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is not None and chat.title:
         _CHAT_TITLES[str(chat.id)] = chat.title  # 网页控制台顶部展示群名称用
+
+    # 私聊不支持记账：命中入账/下发/清空类指令形态时给一条引导语，不执行、不建账
+    if chat is not None and chat.type == "private":
+        if RE_LEDGER_ENTRY.match(text) or RE_LEDGER_DISBURSE.match(text) \
+                or RE_CLEAR_LEDGER.match(text) or RE_UNDO_CLEAR_LEDGER.match(text) \
+                or RE_REVOKE.match(text) or RE_REVOKE_RESTORE.match(text) or RE_RETRACT.match(text):
+            await update.message.reply_text("入账 / 下发 / 清空账单请在群聊里操作，私聊暂不支持记账。")
+            return
 
     text = (update.message.text or update.message.caption or "").strip()
     bot_username = context.bot.username
