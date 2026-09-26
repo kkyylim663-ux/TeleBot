@@ -3133,9 +3133,12 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
     if not will_alert:
         return  # 静默：查重通过 / 无异常 / 冷却期内，什么也不说
 
-    prev_chat = str(prev.get("chat_id") or "")
-    tz_src = prev_chat if prev_chat.isdigit() else chat_id  # 时间按「上次发送所在的群」的时区标注
-    tz = get_ledger_tz(int(tz_src) if tz_src.isdigit() else chat_id)
+    prev_chat = str(prev.get("chat_id") or "")  # 旧记录里 chat_id 可能存的是数字，统一转字符串再判
+    try:
+        tz_src = int(prev_chat) if prev_chat.lstrip("-").isdigit() else chat_id
+    except ValueError:
+        tz_src = chat_id
+    tz = get_ledger_tz(tz_src)  # 时间按「上次发送所在的群」的时区标注
     tz_label = f"UTC{tz.utcoffset(None).total_seconds() / 3600:+g}"
     text = (
         "⚠️ 发现重复截图\n"
