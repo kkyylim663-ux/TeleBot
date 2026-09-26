@@ -360,7 +360,12 @@ async def addoperator_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     if update.callback_query:
         await update.callback_query.answer()
-    await update.effective_message.reply_text("请输入要授权的操作员用户名（@开头）或用户ID（纯数字）：\n发 /cancel 取消")
+    # 带参数直接批量授权：/addoperator @a @b 123456
+    args = (context.args or []) if update.message else []
+    if args:
+        update.message.text = " ".join(args)
+        return await addoperator_receive(update, context)
+    await update.effective_message.reply_text("请输入要授权的操作员用户名（@开头）或用户ID（纯数字）：\n可一次多个，空格分隔\n发 /cancel 取消")
     return ADDOP_WAIT
 
 
@@ -371,23 +376,45 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def addoperator_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = update.message.text.strip()
+    raw = update.message.text.strip()
+    # 批量：按空格/逗号/换行拆分，一次可加多个 @用户名 或 纯数字ID
+    targets = [t for t in re.split(r"[\s,，、]+", raw) if t]
     data = load_operators()
-    if target.startswith("@"):
-        uname = target[1:]
-        if uname not in data["usernames"]:
-            data["usernames"].append(uname)
-    else:
-        try:
-            uid = int(target)
-        except ValueError:
-            await update.message.reply_text("格式不对，用户ID必须是纯数字，或者用 @username，请重新输入：")
-            return ADDOP_WAIT
-        if uid not in data["ids"]:
-            data["ids"].append(uid)
+    ok, bad, dup = [], [], []
+    for target in targets:
+        if target.startswith("@"):
+            uname = target[1:]
+            if not uname:
+                bad.append(target)
+            elif uname in data["usernames"]:
+                dup.append(target)
+            else:
+                data["usernames"].append(uname)
+                ok.append(target)
+        else:
+            try:
+                uid = int(target)
+            except ValueError:
+                bad.append(target)
+                continue
+            if uid in data["ids"]:
+                dup.append(target)
+            else:
+                data["ids"].append(uid)
+                ok.append(target)
+    if not ok and not dup and bad:
+        await update.message.reply_text("格式不对，用户ID必须是纯数字，或者用 @username（可一次多个，空格分隔），请重新输入：")
+        return ADDOP_WAIT
     save_operators(data)
+    parts = []
+    if ok:
+        parts.append("✅ 已授权：" + " ".join(ok))
+    if dup:
+        parts.append("ℹ️ 已在名单：" + " ".join(dup))
+    if bad:
+        parts.append("❌ 无效：" + " ".join(bad))
     text, kb, _ = build_operators_page(1)
-    await update.message.reply_text(f"✅ 已授权操作员：{target}\n\n{text}", reply_markup=kb)
+    await update.message.reply_text("\n".join(parts) + f"\n\n{text}", reply_markup=kb)
     return ConversationHandler.END
 
 
@@ -2899,7 +2926,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat is not None and chat.title:
         _CHAT_TITLES[str(chat.id)] = chat.title  # 网页控制台顶部展示群名称用
 
-    text = update.message.text.strip()
+    text = (update.message.text or update.message.caption or "").strip()
     bot_username = context.bot.username
     if bot_username:
         text = text.replace(f"@{bot_username}", "").strip()
@@ -2954,10 +2981,6 @@ def save_ocr_bills(data):
 
 _OCR_LOCK = asyncio.Lock()       # OCR 推理串行：防并发时内存叠加
 _OCR_MAX_RECORDS = 3000          # 查重库上限，超出丢最旧记录
-_OCR_ALERT_COOLDOWN = 30         # 同一指纹 30 秒内只报一次警，防连环重发刷屏
-_OCR_ALERT_SEEN = {}             # fingerprint -> 上次报警 time.time()
-
-
 def _ledger_same_day_same_amount(chat_id, amount):
     """本群今日账本里有没有金额相同的未作废条目（同日同金额模糊比对）。找到返回该条目。"""
     today = datetime.now(get_ledger_tz(chat_id)).strftime("%Y-%m-%d")
@@ -3045,14 +3068,8 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
         "status": "recorded" if has_key else "unparsed",
     }
 
-    # 报警冷却：同指纹 120 秒内只报一次，连环重发同一张图不刷屏（但每次都照常入库）
+    # 无冷却：凡查重判为重复的图，即时报警（同群跨群一视同仁）；其余静默
     will_alert = reason is not None
-    if will_alert:
-        now = time_mod.time()
-        if now - _OCR_ALERT_SEEN.get(fingerprint, 0) < _OCR_ALERT_COOLDOWN:
-            will_alert = False
-        else:
-            _OCR_ALERT_SEEN[fingerprint] = now
 
     if len(records) >= _OCR_MAX_RECORDS:
         records = records[-(_OCR_MAX_RECORDS - 1):]
@@ -3064,9 +3081,11 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
 
     tz = get_ledger_tz(chat_id)
     tz_label = f"UTC{tz.utcoffset(None).total_seconds() / 3600:+g}"
+    prev_chat = str(prev.get("chat_id") or "")
+    where = f" · 群 {prev_chat}" if prev_chat and prev_chat != str(chat_id) else ""
     text = (
         "⚠️ 发现重复截图\n"
-        f"上次：{prev.get('time', '')}（{tz_label}）"
+        f"上次：{prev.get('time', '')}（{tz_label}）{where}"
     )
     try:
         await update.message.reply_text(text)  # 引用原截图回复——全流程唯一出声点
@@ -3430,6 +3449,8 @@ app.add_handler(MessageHandler(filters.ALL, track_known_group), group=1)
 app.add_error_handler(error_handler)
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# 带图/带媒体的指令消息（文字在 caption 里）：纯图无 caption 走下面的 OCR 查重，互不冲突
+app.add_handler(MessageHandler(filters.CAPTION & ~filters.COMMAND, handle_message))
 # OCR 截图查重监管：Bot 所在所有群的照片/图片文件全局静默监控
 app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
 
