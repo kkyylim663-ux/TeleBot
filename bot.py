@@ -3146,13 +3146,13 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
     )
     # 直接回复原截图（能发版）；撞 429 限流时按 Telegram 给的秒数等待后补发，配额刷新自动续上
     try:
-        update.message.reply_text(text)
+        await update.message.reply_text(text)
     except RetryAfter as e:
         wait = min(float(getattr(e, "retry_after", 0) or 0) + 1.0, 60.0)
         logger.warning("OCR: 警报触发限流，等待 %.1fs 后补发", wait)
         await asyncio.sleep(wait)
         try:
-            update.message.reply_text(text)
+            await update.message.reply_text(text)
         except Exception:
             logger.exception("OCR: 重复警报补发失败")
     except Exception:
