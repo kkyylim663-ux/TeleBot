@@ -2938,6 +2938,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat is not None and chat.title:
         _CHAT_TITLES[str(chat.id)] = chat.title  # 网页控制台顶部展示群名称用
 
+    # 带 caption 的图也必须过 OCR 查重（防止同图改 caption 重发绕过监管）；
+    # 取图口径与 handle_photo 完全一致，查重任务后台跑，caption 指令链照常往下走
+    msg0 = update.message
+    f0 = None
+    if msg0 is not None and ocr_bill is not None:
+        if msg0.photo:
+            f0 = msg0.photo[-1]
+        elif msg0.document and (msg0.document.mime_type or "").startswith("image/"):
+            f0 = msg0.document
+    if f0 is not None:
+        context.application.create_task(_ocr_process_photo(
+            update, context, f0.file_id, f0.file_unique_id, update.effective_chat))
+
     text = (update.message.text or update.message.caption or "").strip()
     bot_username = context.bot.username
     if bot_username:
