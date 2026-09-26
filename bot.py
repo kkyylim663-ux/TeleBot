@@ -3037,55 +3037,6 @@ _OCR_MAX_RECORDS = 100000        # 查重库上限，超出丢最旧记录（配
 _OCR_BILLS_CACHE = None          # 查重库内存缓存（load_ocr_bills/save_ocr_bills 共用）
 _OCR_BILLS_LOADED = False
 _OCR_BILLS_DIRTY = False
-# ---------- 报警按群排队发送（对齐 Telegram 单群约 20 条/分钟限流） ----------
-# 取消冷却后，重复警报可能风暴式齐射（如 24 张同发）；直接 reply 会撞 429 且被直接放弃。
-# 这里按群分桶排队、每群 3 秒/条匀速发：普通 1-2 张依然即时（队列空时入队即发），
-# 风暴时以约 20 条/分钟的节奏滚动补发，配额刷新后自动补上，一张不丢。
-_OCR_ALERT_INTERVAL = 3.0        # 同群两条警报的最小间隔（秒）——20 条/分钟以内
-_OCR_ALERT_QUEUE_MAX = 50        # 单群队列积压上限，超出丢最旧（极端风暴保内存）
-
-_OCR_ALERT_QUEUES = {}           # chat_id(str) -> asyncio.Queue[(chat_id, reply_to_message, text)]
-_OCR_ALERT_WORKERS = {}          # chat_id(str) -> 常驻发送协程 task
-
-
-def _ocr_alert_enqueue(chat_id, reply_to, text):
-    """把一条警报放进该群的发送队列；队列不存在时顺带拉起常驻发送协程。"""
-    key = str(chat_id)
-    q = _OCR_ALERT_QUEUES.get(key)
-    if q is None:
-        q = _OCR_ALERT_QUEUES[key] = asyncio.Queue()
-    if q.qsize() >= _OCR_ALERT_QUEUE_MAX:
-        try:
-            q.get_nowait()  # 丢最旧，防风暴时内存无限涨
-        except asyncio.QueueEmpty:
-            pass
-        logger.warning("OCR: 群 %s 警报队列积压超限，丢弃最旧一条", key)
-    q.put_nowait((key, reply_to, text))
-    worker = _OCR_ALERT_WORKERS.get(key)
-    if worker is None or worker.done():
-        _OCR_ALERT_WORKERS[key] = asyncio.get_running_loop().create_task(_ocr_alert_worker(key))
-
-
-async def _ocr_alert_worker(key):
-    """单群常驻发送协程：逐条发，同群固定间隔；RetryAfter 按 Telegram 给的秒数等待重试一次。"""
-    q = _OCR_ALERT_QUEUES[key]
-    while True:
-        chat_key, reply_to, text = await q.get()
-        try:
-            try:
-                await reply_to.reply_text(text)  # 引用原截图回复——全流程唯一出声点
-            except RetryAfter as e:
-                wait = min(float(getattr(e, "retry_after", 0) or 0) + 1.0, 15.0)
-                logger.warning("OCR: 群 %s 警报触发限流，等待 %.1fs 后重试", chat_key, wait)
-                await asyncio.sleep(wait)
-                await reply_to.reply_text(text)
-        except Exception:
-            logger.exception("OCR: 群 %s 重复警报发送失败（已重试一次仍失败，本条放弃）", chat_key)
-        finally:
-            q.task_done()
-            await asyncio.sleep(_OCR_ALERT_INTERVAL)
-
-
 def _ledger_same_day_same_amount(chat_id, amount):
     """本群今日账本里有没有金额相同的未作废条目（同日同金额模糊比对）。找到返回该条目。"""
     today = datetime.now(get_ledger_tz(chat_id)).strftime("%Y-%m-%d")
@@ -3190,10 +3141,19 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
         "⚠️ 发现重复截图\n"
         f"上次：{prev.get('time', '')}（{tz_label}）"
     )
+    # 直接回复原截图（能发版）；撞 429 限流时按 Telegram 给的秒数等待后补发，配额刷新自动续上
     try:
-        _ocr_alert_enqueue(chat_id, update.message, text)  # 入群队列匀速发，避开限流
+        update.message.reply_text(text)
+    except RetryAfter as e:
+        wait = min(float(getattr(e, "retry_after", 0) or 0) + 1.0, 60.0)
+        logger.warning("OCR: 警报触发限流，等待 %.1fs 后补发", wait)
+        await asyncio.sleep(wait)
+        try:
+            update.message.reply_text(text)
+        except Exception:
+            logger.exception("OCR: 重复警报补发失败")
     except Exception:
-        logger.exception("OCR: 警报入队失败")
+        logger.exception("OCR: 重复警报发送失败")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
