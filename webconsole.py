@@ -1631,6 +1631,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
       if (v && v !== "—") m[v] = (m[v] || 0) + 1;
     };
     (VIEW.entries || []).forEach(function (e) {
+      if (e.voided) return;   // 已撤销/清空的记录不进候选（与表格、导出口径一致）
       if (Q.scope === "all" || Q.scope === "amount") bump(amtTxt(e));
       if (Q.scope === "all" || Q.scope === "mark") bump(e.reply_user_name);
       if (Q.scope === "all" || Q.scope === "operator") bump(e.operator_name);
