@@ -2992,15 +2992,100 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # OCR 模块缺失（未装 rapidocr-onnxruntime）时整段自动失效，Bot 其余功能不受影响。
 
 def load_ocr_bills():
-    return load_json(OCR_BILLS_FILE, [])
+    global _OCR_BILLS_CACHE, _OCR_BILLS_LOADED
+    if not _OCR_BILLS_LOADED:
+        _OCR_BILLS_CACHE = load_json(OCR_BILLS_FILE, [])
+        _OCR_BILLS_LOADED = True
+    return _OCR_BILLS_CACHE
 
 
 def save_ocr_bills(data):
-    save_json(OCR_BILLS_FILE, data)
+    """只更新内存与 dirty 标记，由后台任务每 30 秒统一落盘（写盘节流，主循环零阻塞）。"""
+    global _OCR_BILLS_CACHE, _OCR_BILLS_DIRTY
+    _OCR_BILLS_CACHE = data
+    _OCR_BILLS_DIRTY = True
+
+
+def _ocr_archive_trim(records):
+    """上限裁剪 + 旧记录瘦身：7 天前的记录删 raw_text（查重只用指纹/单号，原文仅供回溯）。"""
+    if len(records) >= _OCR_MAX_RECORDS:
+        records = records[-(_OCR_MAX_RECORDS - 1):]
+    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    for r in records:
+        if r.get("time", "")[:10] < cutoff and "raw_text" in r:
+            del r["raw_text"]
+    return records
+
+
+async def _ocr_archive_flush_job(context):
+    """每 30 秒：dirty 才落盘；落盘前做上限裁剪与旧记录瘦身。"""
+    global _OCR_BILLS_DIRTY
+    if not _OCR_BILLS_DIRTY:
+        return
+    records = _ocr_archive_trim(load_ocr_bills())
+    _OCR_BILLS_CACHE = records
+    _OCR_BILLS_DIRTY = False
+    try:
+        save_json(OCR_BILLS_FILE, records)
+    except Exception:
+        _OCR_BILLS_DIRTY = True  # 写失败下次重试
+        logger.exception("OCR: 查重库落盘失败，稍后重试")
 
 
 _OCR_LOCK = asyncio.Lock()       # OCR 推理串行：防并发时内存叠加
-_OCR_MAX_RECORDS = 3000          # 查重库上限，超出丢最旧记录
+_OCR_MAX_RECORDS = 100000        # 查重库上限，超出丢最旧记录（配合 7 天外瘦身与 30 秒节流落盘）
+_OCR_BILLS_CACHE = None          # 查重库内存缓存（load_ocr_bills/save_ocr_bills 共用）
+_OCR_BILLS_LOADED = False
+_OCR_BILLS_DIRTY = False
+# ---------- 报警按群排队发送（对齐 Telegram 单群约 20 条/分钟限流） ----------
+# 取消冷却后，重复警报可能风暴式齐射（如 24 张同发）；直接 reply 会撞 429 且被直接放弃。
+# 这里按群分桶排队、每群 3 秒/条匀速发：普通 1-2 张依然即时（队列空时入队即发），
+# 风暴时以约 20 条/分钟的节奏滚动补发，配额刷新后自动补上，一张不丢。
+_OCR_ALERT_INTERVAL = 3.0        # 同群两条警报的最小间隔（秒）——20 条/分钟以内
+_OCR_ALERT_QUEUE_MAX = 50        # 单群队列积压上限，超出丢最旧（极端风暴保内存）
+
+_OCR_ALERT_QUEUES = {}           # chat_id(str) -> asyncio.Queue[(chat_id, reply_to_message, text)]
+_OCR_ALERT_WORKERS = {}          # chat_id(str) -> 常驻发送协程 task
+
+
+def _ocr_alert_enqueue(chat_id, reply_to, text):
+    """把一条警报放进该群的发送队列；队列不存在时顺带拉起常驻发送协程。"""
+    key = str(chat_id)
+    q = _OCR_ALERT_QUEUES.get(key)
+    if q is None:
+        q = _OCR_ALERT_QUEUES[key] = asyncio.Queue()
+    if q.qsize() >= _OCR_ALERT_QUEUE_MAX:
+        try:
+            q.get_nowait()  # 丢最旧，防风暴时内存无限涨
+        except asyncio.QueueEmpty:
+            pass
+        logger.warning("OCR: 群 %s 警报队列积压超限，丢弃最旧一条", key)
+    q.put_nowait((key, reply_to, text))
+    worker = _OCR_ALERT_WORKERS.get(key)
+    if worker is None or worker.done():
+        _OCR_ALERT_WORKERS[key] = asyncio.get_running_loop().create_task(_ocr_alert_worker(key))
+
+
+async def _ocr_alert_worker(key):
+    """单群常驻发送协程：逐条发，同群固定间隔；RetryAfter 按 Telegram 给的秒数等待重试一次。"""
+    q = _OCR_ALERT_QUEUES[key]
+    while True:
+        chat_key, reply_to, text = await q.get()
+        try:
+            try:
+                await reply_to.reply_text(text)  # 引用原截图回复——全流程唯一出声点
+            except RetryAfter as e:
+                wait = min(float(getattr(e, "retry_after", 0) or 0) + 1.0, 15.0)
+                logger.warning("OCR: 群 %s 警报触发限流，等待 %.1fs 后重试", chat_key, wait)
+                await asyncio.sleep(wait)
+                await reply_to.reply_text(text)
+        except Exception:
+            logger.exception("OCR: 群 %s 重复警报发送失败（已重试一次仍失败，本条放弃）", chat_key)
+        finally:
+            q.task_done()
+            await asyncio.sleep(_OCR_ALERT_INTERVAL)
+
+
 def _ledger_same_day_same_amount(chat_id, amount):
     """本群今日账本里有没有金额相同的未作废条目（同日同金额模糊比对）。找到返回该条目。"""
     today = datetime.now(get_ledger_tz(chat_id)).strftime("%Y-%m-%d")
@@ -3091,26 +3176,24 @@ async def _ocr_process_photo(update, context, file_id, file_unique_id, chat):
     # 无冷却：凡查重判为重复的图，即时报警（同群跨群一视同仁）；其余静默
     will_alert = reason is not None
 
-    if len(records) >= _OCR_MAX_RECORDS:
-        records = records[-(_OCR_MAX_RECORDS - 1):]
     records.append(record)
-    save_ocr_bills(records)
+    save_ocr_bills(_ocr_archive_trim(records))  # 上限裁剪+瘦身即时做，落盘由后台 30 秒统一
 
     if not will_alert:
         return  # 静默：查重通过 / 无异常 / 冷却期内，什么也不说
 
-    tz = get_ledger_tz(chat_id)
-    tz_label = f"UTC{tz.utcoffset(None).total_seconds() / 3600:+g}"
     prev_chat = str(prev.get("chat_id") or "")
-    where = f" · 群 {prev_chat}" if prev_chat and prev_chat != str(chat_id) else ""
+    tz_src = prev_chat if prev_chat.isdigit() else chat_id  # 时间按「上次发送所在的群」的时区标注
+    tz = get_ledger_tz(int(tz_src) if tz_src.isdigit() else chat_id)
+    tz_label = f"UTC{tz.utcoffset(None).total_seconds() / 3600:+g}"
     text = (
         "⚠️ 发现重复截图\n"
-        f"上次：{prev.get('time', '')}（{tz_label}）{where}"
+        f"上次：{prev.get('time', '')}（{tz_label}）"
     )
     try:
-        await update.message.reply_text(text)  # 引用原截图回复——全流程唯一出声点
+        _ocr_alert_enqueue(chat_id, update.message, text)  # 入群队列匀速发，避开限流
     except Exception:
-        logger.exception("OCR: 重复报警发送失败")
+        logger.exception("OCR: 警报入队失败")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3476,6 +3559,7 @@ app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_ph
 
 if app.job_queue is not None:
     app.job_queue.run_repeating(auto_cut_job, interval=5, first=5)
+    app.job_queue.run_repeating(_ocr_archive_flush_job, interval=30, first=30)  # OCR 查重库节流落盘
     logger.info("✅ 自动日切定时任务已注册（每5秒检查一次，启动5秒后首次执行）")
 else:
     logger.critical(
