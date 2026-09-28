@@ -2724,20 +2724,24 @@ migrate_legacy_targets()
 
 # ==================== 回复客户消息 · 智能拼装记账 ====================
 # 操作员回复客户消息时，代号/金额/备注可以任意分布在客户原文和回复两条消息里，自动拼装成一笔记账。
-# 触发底线：回复里至少命中「白名单分组代号」或「独立数字金额」一项——"OK""没收到"这类词不触发。
+# 触发底线：回复里至少命中「白名单分组代号」或「带符号独立金额（+200/-200）」一项——
+# 裸数字（如 "max 200"）和"OK""没收到"这类普通回复不触发。
 # 必须排在 try_handle_ledger_entry 之前：否则回复「+200」会先被普通记账规则吃掉、丢掉客户备注。
 
 RE_STANDALONE_NUM = re.compile(r"^([+-])?(\d+(?:\.\d+)?)$")  # 整个词就是数字，可带符号；不拆字母数字连写词
 
 
-def extract_amount_tokens(text):
-    """从一段文字里找出所有『独立成词』的数字词，返回 [(符号, 金额字符串, 原始token), ...]"""
+def extract_amount_tokens(text, require_sign=False):
+    """从一段文字里找出所有『独立成词』的数字词，返回 [(符号, 金额字符串, 原始token), ...]
+    require_sign=True 时只认带符号的（+200 / -200）：普通回复里的裸数字（如 "max 200"）不算金额，防止误触发记账。"""
     tokens = text.split()
     matches = []
     for tok in tokens:
         m = RE_STANDALONE_NUM.match(tok)
         if m:
             sign = m.group(1) or "+"  # 没写符号默认当作 +（入账）
+            if require_sign and m.group(1) is None:
+                continue
             matches.append((sign, m.group(2), tok))
     return matches
 
@@ -2779,9 +2783,10 @@ async def try_handle_ledger_smart_merge(update: Update, context: ContextTypes.DE
     reply_text = normalize(text.strip())
 
     tag = find_known_tag_token(reply_text)
-    reply_amounts = extract_amount_tokens(reply_text)
+    reply_amounts = extract_amount_tokens(reply_text, require_sign=True)
 
-    # 触发底线：回复里必须至少命中「白名单代号」或「独立数字金额」其中一项，否则当普通回复忽略
+    # 触发底线：回复里必须至少命中「白名单代号」或「带符号独立金额（+200/-200）」其中一项，
+    # 否则当普通回复忽略——裸数字不算（"max 200" 这类正常回复不能记账）
     if not tag and not reply_amounts:
         return False
 
