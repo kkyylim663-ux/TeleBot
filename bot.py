@@ -2724,8 +2724,9 @@ migrate_legacy_targets()
 
 # ==================== 回复客户消息 · 智能拼装记账 ====================
 # 操作员回复客户消息时，代号/金额/备注可以任意分布在客户原文和回复两条消息里，自动拼装成一笔记账。
-# 触发底线：回复里至少命中「白名单分组代号」或「带符号独立金额（+200/-200）」一项——
-# 裸数字（如 "max 200"）和"OK""没收到"这类普通回复不触发。
+# 触发底线：回复里至少命中「白名单分组代号」或「带符号金额」一项——
+# "+200"/"+ 200"/"+ 备注 200" 都算（独立的 +/- 号让裸数字也算金额）；
+# "max 200" 这类没有 +/- 号的普通回复不触发。
 # 必须排在 try_handle_ledger_entry 之前：否则回复「+200」会先被普通记账规则吃掉、丢掉客户备注。
 
 RE_STANDALONE_NUM = re.compile(r"^([+-])?(\d+(?:\.\d+)?)$")  # 整个词就是数字，可带符号；不拆字母数字连写词
@@ -2784,8 +2785,18 @@ async def try_handle_ledger_smart_merge(update: Update, context: ContextTypes.DE
 
     tag = find_known_tag_token(reply_text)
     reply_amounts = extract_amount_tokens(reply_text, require_sign=True)
+    # 回复里没写带符号金额、但带了独立的 +/- 号（如 "+ 200"、"+ 充值 200"）：
+    # 裸数字跟着这个符号算金额（+ 记入、- 记出）；完全没有 +/- 号的回复（"max 200"）裸数字不算，不触发记账
+    if not reply_amounts:
+        sign_tokens = [t for t in reply_text.split() if t in ("+", "-")]
+        if sign_tokens:
+            default_sign = sign_tokens[0]
+            reply_amounts = [
+                (default_sign, amt, tok)
+                for _, amt, tok in extract_amount_tokens(reply_text)
+            ]
 
-    # 触发底线：回复里必须至少命中「白名单代号」或「带符号独立金额（+200/-200）」其中一项，
+    # 触发底线：回复里必须至少命中「白名单代号」或「带 +/- 号的金额」其中一项，
     # 否则当普通回复忽略——裸数字不算（"max 200" 这类正常回复不能记账）
     if not tag and not reply_amounts:
         return False
